@@ -52,11 +52,34 @@ app.post("/api/quotations", quotationUpload, async (req, res) => {
     });
   }
 
-  if (!p.rfqNumber || !p.itemId) {
-    return res.status(400).json({ ok: false, message: "Missing rfqNumber or itemId." });
+  if (!p.rfqNumber) {
+    return res.status(400).json({ ok: false, message: "Missing rfqNumber." });
   }
-  if (!(Number(p.price) > 0)) {
-    return res.status(400).json({ ok: false, message: "A valid price is required." });
+
+  let items = [];
+  if (p.items) {
+    try {
+      items = typeof p.items === "string" ? JSON.parse(p.items) : p.items;
+    } catch {
+      return res.status(400).json({ ok: false, message: "Invalid items JSON." });
+    }
+  }
+
+  if (Array.isArray(items) && items.length) {
+    const bad = items.find((line) => !(Number(line.price) > 0));
+    if (bad) {
+      return res.status(400).json({
+        ok: false,
+        message: "Each item must have a valid price.",
+      });
+    }
+  } else {
+    if (!p.itemId) {
+      return res.status(400).json({ ok: false, message: "Missing itemId." });
+    }
+    if (!(Number(p.price) > 0)) {
+      return res.status(400).json({ ok: false, message: "A valid price is required." });
+    }
   }
 
   try {

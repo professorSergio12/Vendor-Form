@@ -203,19 +203,11 @@ function buildUploadAttempts(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
   const dotted = `${subform()}.${fieldName}`;
+  // Mirror of "Download File from Subform" — replace /download with /upload.
+  // Do NOT send parent_id; that param is JS-SDK-only and rejected by REST (code 1060).
   return [
     {
-      label: "subform-row + parent_id body",
-      url: `${base}/${subRowId}/${dotted}/upload`,
-      extraFields: { parent_id: recordId },
-    },
-    {
-      label: "subform-row + parent_id query",
-      url: `${base}/${subRowId}/${dotted}/upload?parent_id=${recordId}`,
-      extraFields: {},
-    },
-    {
-      label: "parent path + subform row",
+      label: "subform upload path",
       url: `${base}/${recordId}/${dotted}/${subRowId}/upload`,
       extraFields: {},
     },
@@ -230,8 +222,8 @@ function describeUploadError(status, data, raw) {
     data?.error ||
     (typeof raw === "string" && raw.trim() ? raw : "") ||
     "upload failed";
-  if (code === 2945 || /scope|oauth/i.test(String(msg))) {
-    return `${msg} (add ZohoCreator.report.CREATE scope to refresh token)`;
+  if (code === 2945 || /invalid oauthscope|oauthscope|scope/i.test(String(msg))) {
+    return `${msg} — regenerate refresh token with scope ZohoCreator.report.CREATE`;
   }
   if (status) return `HTTP ${status}: ${msg}`;
   return msg;
@@ -366,9 +358,44 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     resolveRfqId(flatPayload, token),
   ]);
 
+  let linePayloads = [];
+  if (flatPayload.items) {
+    try {
+      const parsed =
+        typeof flatPayload.items === "string"
+          ? JSON.parse(flatPayload.items)
+          : flatPayload.items;
+      if (Array.isArray(parsed) && parsed.length) {
+        linePayloads = parsed.map((line) => ({
+          ...flatPayload,
+          itemId: line.itemId,
+          product: line.product,
+          quantity: line.quantity,
+          unit: line.unit,
+          price: line.price,
+          uniqueId: line.uniqueId || flatPayload.uniqueId,
+        }));
+      }
+    } catch (e) {
+      console.error("Failed to parse items JSON:", e);
+    }
+  }
+
+  if (!linePayloads.length) {
+    linePayloads = [flatPayload];
+  }
+
+  const subformRows = linePayloads.map((line, index) => {
+    const rowPayload =
+      index === 0
+        ? line
+        : { ...line, freight: 0 };
+    return buildSubformRow(rowPayload);
+  });
+
   const data = {
     Submission_Date: formatSubmissionDate(),
-    [subform()]: [buildSubformRow(flatPayload)],
+    [subform()]: subformRows,
     Margin: 0,
     Status: defaultStatus(),
   };
