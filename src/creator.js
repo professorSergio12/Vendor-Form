@@ -8,6 +8,7 @@
  *   - otherwise look the record up by name / number via a report (report.READ).
  */
 import { getAccessToken } from "./zohoToken.js";
+import axios from "axios";
 import FormData from "form-data";
 
 const DC = process.env.ZOHO_DC || "in";
@@ -172,37 +173,84 @@ async function getFirstSubformRowId(recordId, token) {
   return extractSubformRowId(rec);
 }
 
+function buildUploadUrls(recordId, subRowId, fieldName) {
+  const base =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
+  const dotted = `${subform()}.${fieldName}`;
+  return [
+    // JS SDK maps subform uploads to the standard upload API:
+    // id = subform row, field_name = Subform.Field, parent_id = parent record.
+    `${base}/${subRowId}/${dotted}/upload?parent_id=${recordId}`,
+    // Mirror of the download-from-subform path with /upload instead of /download.
+    `${base}/${recordId}/${dotted}/${subRowId}/upload`,
+    // Parent record + dotted field only (some accounts accept this shape).
+    `${base}/${recordId}/${dotted}/upload?subform_record_id=${subRowId}`,
+  ];
+}
+
+function describeUploadError(status, data, raw) {
+  const code = data?.code;
+  const msg = data?.message || data?.error || raw || "upload failed";
+  if (code === 2945 || /scope|oauth/i.test(String(msg))) {
+    return `${msg} (add ZohoCreator.report.CREATE scope to refresh token)`;
+  }
+  if (status) return `HTTP ${status}: ${msg}`;
+  return msg;
+}
+
 /*
  * Uploads one file into a file-upload field inside a subform row.
- * URL: .../report/<report>/<recordId>/<subform>.<field>/<subformRowId>/upload
+ * Tries the URL shapes Zoho documents/uses for subform file fields.
  * Requires the ZohoCreator.report.CREATE scope on the refresh token.
  */
 async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
-  const url =
-    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}` +
-    `/${recordId}/${subform()}.${fieldName}/${subRowId}/upload`;
+  const urls = buildUploadUrls(recordId, subRowId, fieldName);
 
-  const fd = new FormData();
-  fd.append("file", file.buffer, {
-    filename: file.originalname || "upload.bin",
-    contentType: file.mimetype || "application/octet-stream",
-  });
+  let last = { ok: false, field: fieldName, status: 0, data: {}, raw: "" };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      ...fd.getHeaders(),
-    },
-    body: fd,
-    duplex: "half",
-  });
-  const data = await res.json().catch(() => ({}));
-  const ok = res.ok && data.code === 3000;
-  if (!ok) {
-    console.error(`Upload to ${fieldName} failed (${res.status}):`, data);
+  for (const url of urls) {
+    const fd = new FormData();
+    fd.append("file", file.buffer, {
+      filename: file.originalname || "upload.bin",
+      contentType: file.mimetype || "application/octet-stream",
+    });
+
+    try {
+      const res = await axios.post(url, fd, {
+        headers: {
+          Authorization: `Zoho-oauthtoken ${token}`,
+          ...fd.getHeaders(),
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: () => true,
+      });
+
+      const data = res.data && typeof res.data === "object" ? res.data : {};
+      const raw = typeof res.data === "string" ? res.data : JSON.stringify(data);
+      const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
+
+      if (ok) {
+        return { ok: true, field: fieldName, status: res.status, data, url };
+      }
+
+      last = { ok: false, field: fieldName, status: res.status, data, raw, url };
+      console.error(`Upload to ${fieldName} failed via ${url}:`, data || raw);
+    } catch (e) {
+      last = {
+        ok: false,
+        field: fieldName,
+        status: 0,
+        data: {},
+        raw: "",
+        url,
+        error: e.message,
+      };
+      console.error(`Upload to ${fieldName} threw via ${url}:`, e);
+    }
   }
-  return { ok, field: fieldName, status: res.status, data };
+
+  return last;
 }
 
 /*
@@ -248,7 +296,9 @@ async function uploadSubformFiles(recordId, createResponseData, files, token) {
       ? null
       : results
           .filter((r) => !r.ok)
-          .map((r) => `${r.field}: ${r.data?.message || r.error || "upload failed"}`)
+          .map((r) =>
+            `${r.field}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
+          )
           .join("; "),
   };
 }

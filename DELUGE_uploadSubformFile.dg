@@ -1,0 +1,43 @@
+/*
+ * Optional Custom API fallback if REST subform upload from Node fails.
+ *
+ * Create a Custom API in Creator:
+ *   - Name: upload_quotation_subform_file
+ *   - Map to this function
+ *   - Auth: Public Key (same pattern as sendRFQToVendors)
+ *
+ * Parameters (all string):
+ *   parentRecordId  — Vendor Quotations record ID
+ *   subformRowId    — Quotation_Items row ID
+ *   fieldName       — Attachment or Datasheet
+ *   fileUrl         — Public HTTPS URL Deluge can GET (temp file from backend)
+ *
+ * Requires a Zoho Creator connection named "zoho-creator" in the app.
+ */
+string uploadQuotationSubformFile(string parentRecordId, string subformRowId, string fieldName, string fileUrl)
+{
+	owner = "airatrex959";
+	appLink = "airatrex";
+	reportLink = "Vendor_Quotations_Report";
+	subformLink = "Quotation_Items";
+
+	fileObj = invokeurl
+	[
+		url :fileUrl
+		type :GET
+	];
+	fileObj.setParamName("file");
+
+	fieldPath = subformLink + "." + fieldName;
+	uploadUrl = "https://www.zohoapis.in/creator/v2.1/data/" + owner + "/" + appLink + "/report/" + reportLink + "/" + subformRowId + "/" + fieldPath + "/upload?parent_id=" + parentRecordId;
+
+	response = invokeurl
+	[
+		url :uploadUrl
+		type :POST
+		connection:"zoho-creator"
+		files:fileObj
+	];
+
+	return response.toString();
+}
