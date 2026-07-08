@@ -45,6 +45,13 @@ app.post("/api/quotations", quotationUpload, async (req, res) => {
     datasheet: req.files?.datasheet?.[0],
   };
 
+  if (files.attachment || files.datasheet) {
+    console.log("Files received:", {
+      attachment: files.attachment?.originalname,
+      datasheet: files.datasheet?.originalname,
+    });
+  }
+
   if (!p.rfqNumber || !p.itemId) {
     return res.status(400).json({ ok: false, message: "Missing rfqNumber or itemId." });
   }
@@ -55,11 +62,17 @@ app.post("/api/quotations", quotationUpload, async (req, res) => {
   try {
     const result = await createQuotationRecord(p, files);
     if (result.ok) {
+      const hadFiles = Boolean(files.attachment || files.datasheet);
+      const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
       return res.json({
         ok: true,
         uniqueId: p.uniqueId,
         recordId: result.recordId,
         uploads: result.uploads,
+        uploadWarning: uploadFailed
+          ? result.uploads.error ||
+            "Quotation saved but one or more files could not be uploaded."
+          : null,
       });
     }
     console.error("Creator rejected submission:", result.data);

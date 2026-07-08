@@ -8,6 +8,7 @@
  *   - otherwise look the record up by name / number via a report (report.READ).
  */
 import { getAccessToken } from "./zohoToken.js";
+import FormData from "form-data";
 
 const DC = process.env.ZOHO_DC || "in";
 const API_HOST = `https://www.zohoapis.${DC}`;
@@ -96,6 +97,16 @@ async function resolveRfqId(p, token) {
   return resolveRecordId(RFQ_REPORT, RFQ_MATCH_FIELD, p.rfqNumber, token);
 }
 
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Pull the first subform row ID out of an addRecords / getRecord response. */
+function extractSubformRowId(record) {
+  if (!record) return null;
+  const rows = record[subform()];
+  if (Array.isArray(rows) && rows.length && rows[0].ID) return String(rows[0].ID);
+  return null;
+}
+
 export function buildSubformRow(p) {
   const unitPrice = num(p.price);
   const qty = num(p.quantity);
@@ -129,11 +140,22 @@ export function buildSubformRow(p) {
 }
 
 /*
- * After the record is created we only know the parent record ID. To upload a
- * file into a subform file field we also need the subform ROW id. We read the
- * record back from a report (report.READ) and pick the first Quotation_Items
- * row's ID.
+ * After the record is created we need the subform ROW id for file upload.
+ * Prefer the ID returned inline by addRecords; otherwise read the record back
+ * from the report (with a short retry in case Creator indexes slowly).
  */
+async function resolveSubformRowId(recordId, createResponseData, token) {
+  const fromCreate = extractSubformRowId(createResponseData);
+  if (fromCreate) return fromCreate;
+
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const subRowId = await getFirstSubformRowId(recordId, token);
+    if (subRowId) return subRowId;
+    if (attempt < 4) await wait(400 * attempt);
+  }
+  return null;
+}
+
 async function getFirstSubformRowId(recordId, token) {
   const url =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}` +
@@ -142,10 +164,12 @@ async function getFirstSubformRowId(recordId, token) {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
   });
   const data = await res.json().catch(() => ({}));
-  const rec = data && data.data;
-  const rows = rec && rec[subform()];
-  if (Array.isArray(rows) && rows.length) return rows[0].ID;
-  return null;
+  if (data.code !== 3000) {
+    console.error("getRecordById for subform row failed:", data);
+    return null;
+  }
+  const rec = Array.isArray(data.data) ? data.data[0] : data.data;
+  return extractSubformRowId(rec);
 }
 
 /*
@@ -159,26 +183,32 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
     `/${recordId}/${subform()}.${fieldName}/${subRowId}/upload`;
 
   const fd = new FormData();
-  const blob = new Blob([file.buffer], {
-    type: file.mimetype || "application/octet-stream",
+  fd.append("file", file.buffer, {
+    filename: file.originalname || "upload.bin",
+    contentType: file.mimetype || "application/octet-stream",
   });
-  fd.append("file", blob, file.originalname || "upload.bin");
 
   const res = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      ...fd.getHeaders(),
+    },
     body: fd,
+    duplex: "half",
   });
   const data = await res.json().catch(() => ({}));
-  return { ok: res.ok && data.code === 3000, field: fieldName, data };
+  const ok = res.ok && data.code === 3000;
+  if (!ok) {
+    console.error(`Upload to ${fieldName} failed (${res.status}):`, data);
+  }
+  return { ok, field: fieldName, status: res.status, data };
 }
 
 /*
  * Uploads Attachment + Datasheet files (if any) into the created subform row.
- * Failures here are non-fatal: the quotation record already exists, so we log
- * and report per-file status rather than failing the whole submission.
  */
-async function uploadSubformFiles(recordId, files, token) {
+async function uploadSubformFiles(recordId, createResponseData, files, token) {
   const results = [];
   const mapping = [
     { field: ATTACHMENT_FIELD, file: files.attachment },
@@ -187,13 +217,14 @@ async function uploadSubformFiles(recordId, files, token) {
 
   if (!mapping.length) return { attempted: false, results };
 
-  const subRowId = await getFirstSubformRowId(recordId, token);
+  const subRowId = await resolveSubformRowId(recordId, createResponseData, token);
   if (!subRowId) {
     return {
       attempted: true,
       subRowId: null,
       results,
-      error: "Could not resolve subform row ID for file upload.",
+      error:
+        "Could not resolve Quotation_Items row ID after create. Files were not uploaded.",
     };
   }
 
@@ -201,13 +232,25 @@ async function uploadSubformFiles(recordId, files, token) {
     try {
       const r = await uploadSubformFile(recordId, subRowId, m.field, m.file, token);
       results.push(r);
-      if (!r.ok) console.error(`Upload to ${m.field} failed:`, r.data);
     } catch (e) {
       console.error(`Upload to ${m.field} threw:`, e);
       results.push({ ok: false, field: m.field, error: e.message });
     }
   }
-  return { attempted: true, subRowId, results };
+
+  const allOk = results.every((r) => r.ok);
+  return {
+    attempted: true,
+    subRowId,
+    results,
+    allOk,
+    error: allOk
+      ? null
+      : results
+          .filter((r) => !r.ok)
+          .map((r) => `${r.field}: ${r.data?.message || r.error || "upload failed"}`)
+          .join("; "),
+  };
 }
 
 export async function createQuotationRecord(flatPayload, files = {}) {
@@ -240,12 +283,13 @@ export async function createQuotationRecord(flatPayload, files = {}) {
 
   const respData = await res.json().catch(() => ({}));
   const ok = res.ok && respData.code === 3000;
-  const recordId = respData?.data?.ID;
+  const created = Array.isArray(respData.data) ? respData.data[0] : respData.data;
+  const recordId = created?.ID;
 
   // Step 2: upload the subform files onto the freshly-created row.
   let uploads = { attempted: false, results: [] };
   if (ok && recordId) {
-    uploads = await uploadSubformFiles(recordId, files, token);
+    uploads = await uploadSubformFiles(recordId, created, files, token);
   }
 
   return { ok, status: res.status, data: respData, recordId, resolved: { vendorId, rfqId }, uploads };
