@@ -2,23 +2,20 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { createQuotationRecord, formatCreatorError } from "./creator.js";
+import {
+  createQuotationRecord,
+  formatCreatorError,
+  parseFilesByRow,
+} from "./creator.js";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
-// In-memory multipart parsing for the Attachment + Datasheet subform files.
-// Creator file-upload fields accept up to 50 MB.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024, files: 2 },
+  limits: { fileSize: 50 * 1024 * 1024, files: 40 },
 });
-const quotationUpload = upload.fields([
-  { name: "attachment", maxCount: 1 },
-  { name: "datasheet", maxCount: 1 },
-]);
 
-// CORS — only allow the form origins listed in ALLOWED_ORIGINS.
 const allowed = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -27,7 +24,6 @@ const allowed = (process.env.ALLOWED_ORIGINS || "")
 app.use(
   cors({
     origin(origin, cb) {
-      // Allow same-origin / server-to-server (no Origin header) and listed ones.
       if (!origin || allowed.length === 0 || allowed.includes(origin)) return cb(null, true);
       return cb(new Error(`Origin not allowed: ${origin}`));
     },
@@ -36,21 +32,9 @@ app.use(
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "quotation-backend" }));
 
-// Vendor submits the React form -> here -> Zoho Creator Vendor_Quotations.
-// Accepts either multipart/form-data (with attachment/datasheet files) or JSON.
-app.post("/api/quotations", quotationUpload, async (req, res) => {
+app.post("/api/quotations", upload.any(), async (req, res) => {
   const p = req.body || {};
-  const files = {
-    attachment: req.files?.attachment?.[0],
-    datasheet: req.files?.datasheet?.[0],
-  };
-
-  if (files.attachment || files.datasheet) {
-    console.log("Files received:", {
-      attachment: files.attachment?.originalname,
-      datasheet: files.datasheet?.originalname,
-    });
-  }
+  const filesByRow = parseFilesByRow(req.files || []);
 
   if (!p.rfqNumber) {
     return res.status(400).json({ ok: false, message: "Missing rfqNumber." });
@@ -83,14 +67,15 @@ app.post("/api/quotations", quotationUpload, async (req, res) => {
   }
 
   try {
-    const result = await createQuotationRecord(p, files);
+    const result = await createQuotationRecord(p, filesByRow);
     if (result.ok) {
-      const hadFiles = Boolean(files.attachment || files.datasheet);
+      const hadFiles = Object.keys(filesByRow).length > 0;
       const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
       return res.json({
         ok: true,
         uniqueId: p.uniqueId,
         recordId: result.recordId,
+        resolved: result.resolved,
         uploads: result.uploads,
         uploadWarning: uploadFailed
           ? result.uploads.error ||

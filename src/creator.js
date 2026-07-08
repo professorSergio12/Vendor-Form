@@ -35,6 +35,7 @@ const VENDOR_MATCH_FIELD = process.env.CREATOR_VENDOR_MATCH_FIELD || "Vendor_Nam
 const VENDOR_CODE_FIELD = process.env.CREATOR_VENDOR_CODE_FIELD || "Vendor_Code";
 const RFQ_REPORT = process.env.CREATOR_RFQ_REPORT || "RFQ1";
 const RFQ_MATCH_FIELD = process.env.CREATOR_RFQ_MATCH_FIELD || "RFQ_Number";
+const ITEM_MASTER_REPORT = process.env.CREATOR_ITEM_MASTER_REPORT || "Items_Report";
 
 /* Extracts a numeric value from mixed text (e.g. "Ex-works / 500" -> 500). */
 function num(v, fallback = 0) {
@@ -126,25 +127,32 @@ export function formatCreatorError(data) {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* Pull the first subform row ID out of an addRecords / getRecord response. */
-function extractSubformRowId(record) {
-  if (!record) return null;
-  const rows = record[subform()];
-  if (Array.isArray(rows) && rows.length && rows[0].ID) return String(rows[0].ID);
+/* Resolve Item_Master lookup from the item / product record id in the email link. */
+async function resolveItemMasterId(p, token) {
+  for (const candidate of [p.itemMasterId, p.itemId]) {
+    const valid = await validateReportRecordId(ITEM_MASTER_REPORT, candidate, token);
+    if (valid) return valid;
+  }
   return null;
+}
+
+/* Pull all subform row IDs from an addRecords / getRecord response. */
+function extractAllSubformRowIds(record) {
+  if (!record) return [];
+  const rows = record[subform()];
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => (r && r.ID ? String(r.ID) : null)).filter(Boolean);
 }
 
 export function buildSubformRow(p) {
   const unitPrice = num(p.price);
-  const qty = num(p.quantity);
+  const qty = num(p.quantity, 1);
   const gstPct = num(p.gst);
   const freight = num(p.freight);
   const lineTotal = unitPrice * qty;
   const gstAmount = (lineTotal * gstPct) / 100;
   const totalAmount = Math.round((lineTotal + gstAmount + freight) * 100) / 100;
 
-  // Fold Validity + Lead Time into Remarks since the subform's Validity column
-  // is a DATE field (the form collects them as free text like "30 days").
   const extras = [
     p.validity ? `Validity: ${p.validity}` : "",
     p.leadTime ? `Lead time: ${p.leadTime}` : "",
@@ -153,8 +161,7 @@ export function buildSubformRow(p) {
     .filter(Boolean)
     .join(" | ");
 
-  return {
-    RFQ_Item_ID: intOnly(p.itemId), // subform field is Number
+  const row = {
     Product: p.product || "",
     Quantity: qty,
     Currency: p.currency || "INR",
@@ -163,27 +170,33 @@ export function buildSubformRow(p) {
     GST: gstPct,
     Total_Amount: totalAmount,
     Remarks: extras,
+    Inquiry_Item_from_CRM: String(p.inquiryItem || p.itemId || ""),
   };
+
+  if (p.itemMasterId) {
+    row.Item_Master = p.itemMasterId;
+  }
+
+  return row;
 }
 
 /*
- * After the record is created we need the subform ROW id for file upload.
- * Prefer the ID returned inline by addRecords; otherwise read the record back
- * from the report (with a short retry in case Creator indexes slowly).
+ * After the record is created we need subform ROW ids for file upload.
+ * Prefer IDs returned inline by addRecords; otherwise read the record back.
  */
-async function resolveSubformRowId(recordId, createResponseData, token) {
-  const fromCreate = extractSubformRowId(createResponseData);
-  if (fromCreate) return fromCreate;
+async function resolveAllSubformRowIds(recordId, createResponseData, expectedCount, token) {
+  const fromCreate = extractAllSubformRowIds(createResponseData);
+  if (fromCreate.length >= expectedCount) return fromCreate;
 
   for (let attempt = 1; attempt <= 4; attempt += 1) {
-    const subRowId = await getFirstSubformRowId(recordId, token);
-    if (subRowId) return subRowId;
+    const ids = await getAllSubformRowIds(recordId, token);
+    if (ids.length >= expectedCount) return ids;
     if (attempt < 4) await wait(400 * attempt);
   }
-  return null;
+  return fromCreate;
 }
 
-async function getFirstSubformRowId(recordId, token) {
+async function getAllSubformRowIds(recordId, token) {
   const url =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}` +
     `/${recordId}?field_config=all`;
@@ -192,11 +205,11 @@ async function getFirstSubformRowId(recordId, token) {
   });
   const data = await res.json().catch(() => ({}));
   if (data.code !== 3000) {
-    console.error("getRecordById for subform row failed:", data);
-    return null;
+    console.error("getRecordById for subform rows failed:", data);
+    return [];
   }
   const rec = Array.isArray(data.data) ? data.data[0] : data.data;
-  return extractSubformRowId(rec);
+  return extractAllSubformRowIds(rec);
 }
 
 function buildUploadAttempts(recordId, subRowId, fieldName) {
@@ -301,42 +314,66 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
 }
 
 /*
- * Uploads Attachment + Datasheet files (if any) into the created subform row.
+ * Uploads per-row Attachment + Datasheet files into matching subform rows.
+ * filesByRow: { 0: { attachment?, datasheet? }, 1: { ... } }
+ * Legacy: { attachment, datasheet } uploads to row 0 only.
  */
-async function uploadSubformFiles(recordId, createResponseData, files, token) {
+async function uploadSubformFiles(recordId, createResponseData, filesByRow, token) {
   const results = [];
-  const mapping = [
-    { field: ATTACHMENT_FIELD, file: files.attachment },
-    { field: DATASHEET_FIELD, file: files.datasheet },
-  ].filter((m) => m.file);
+  const rowIndexes = Object.keys(filesByRow || {})
+    .map((k) => Number(k))
+    .filter((n) => !Number.isNaN(n))
+    .sort((a, b) => a - b);
 
-  if (!mapping.length) return { attempted: false, results };
+  const hasAnyFile = rowIndexes.some((idx) => {
+    const row = filesByRow[idx] || {};
+    return row.attachment || row.datasheet;
+  });
+  if (!hasAnyFile) return { attempted: false, results };
 
-  const subRowId = await resolveSubformRowId(recordId, createResponseData, token);
-  if (!subRowId) {
+  const subRowIds = await resolveAllSubformRowIds(
+    recordId,
+    createResponseData,
+    rowIndexes.length ? Math.max(...rowIndexes) + 1 : 1,
+    token
+  );
+
+  if (!subRowIds.length) {
     return {
       attempted: true,
-      subRowId: null,
+      subRowIds: [],
       results,
-      error:
-        "Could not resolve Quotation_Items row ID after create. Files were not uploaded.",
+      error: "Could not resolve Quotation_Items row IDs after create. Files were not uploaded.",
     };
   }
 
-  for (const m of mapping) {
-    try {
-      const r = await uploadSubformFile(recordId, subRowId, m.field, m.file, token);
-      results.push(r);
-    } catch (e) {
-      console.error(`Upload to ${m.field} threw:`, e);
-      results.push({ ok: false, field: m.field, error: e.message });
+  for (const idx of rowIndexes) {
+    const rowFiles = filesByRow[idx] || {};
+    const subRowId = subRowIds[idx];
+    if (!subRowId) {
+      results.push({ ok: false, row: idx, error: "Missing subform row id" });
+      continue;
+    }
+    for (const [kind, field] of [
+      ["attachment", ATTACHMENT_FIELD],
+      ["datasheet", DATASHEET_FIELD],
+    ]) {
+      const file = rowFiles[kind];
+      if (!file) continue;
+      try {
+        const r = await uploadSubformFile(recordId, subRowId, field, file, token);
+        results.push({ ...r, row: idx });
+      } catch (e) {
+        console.error(`Upload ${kind} row ${idx} threw:`, e);
+        results.push({ ok: false, row: idx, field, error: e.message });
+      }
     }
   }
 
   const allOk = results.every((r) => r.ok);
   return {
     attempted: true,
-    subRowId,
+    subRowIds,
     results,
     allOk,
     error: allOk
@@ -344,10 +381,22 @@ async function uploadSubformFiles(recordId, createResponseData, files, token) {
       : results
           .filter((r) => !r.ok)
           .map((r) =>
-            `${r.field}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
+            `row ${r.row ?? "?"} ${r.field || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
           )
           .join("; "),
   };
+}
+
+export function parseFilesByRow(reqFiles = []) {
+  const byRow = {};
+  for (const file of reqFiles) {
+    const m = String(file.fieldname || "").match(/^(attachment|datasheet)_(\d+)$/);
+    if (!m) continue;
+    const idx = Number(m[2]);
+    if (!byRow[idx]) byRow[idx] = {};
+    byRow[idx][m[1]] = file;
+  }
+  return byRow;
 }
 
 export async function createQuotationRecord(flatPayload, files = {}) {
@@ -369,10 +418,16 @@ export async function createQuotationRecord(flatPayload, files = {}) {
         linePayloads = parsed.map((line) => ({
           ...flatPayload,
           itemId: line.itemId,
+          itemMasterId: line.itemMasterId || line.itemId,
           product: line.product,
           quantity: line.quantity,
           unit: line.unit,
           price: line.price,
+          leadTime: line.leadTime,
+          validity: line.validity,
+          freight: line.freight,
+          gst: line.gst,
+          remarks: line.remarks,
           uniqueId: line.uniqueId || flatPayload.uniqueId,
         }));
       }
@@ -382,16 +437,21 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   }
 
   if (!linePayloads.length) {
-    linePayloads = [flatPayload];
+    linePayloads = [{ ...flatPayload, itemMasterId: flatPayload.itemMasterId || flatPayload.itemId }];
   }
 
-  const subformRows = linePayloads.map((line, index) => {
-    const rowPayload =
-      index === 0
-        ? line
-        : { ...line, freight: 0 };
-    return buildSubformRow(rowPayload);
-  });
+  const subformRows = [];
+  const resolvedItemMasters = [];
+  for (const line of linePayloads) {
+    const itemMasterId = await resolveItemMasterId(line, token);
+    resolvedItemMasters.push(itemMasterId);
+    subformRows.push(
+      buildSubformRow({
+        ...line,
+        itemMasterId: itemMasterId || null,
+      })
+    );
+  }
 
   const data = {
     Submission_Date: formatSubmissionDate(),
@@ -418,11 +478,18 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   const created = Array.isArray(respData.data) ? respData.data[0] : respData.data;
   const recordId = created?.ID;
 
-  // Step 2: upload the subform files onto the freshly-created row.
+  // Step 2: upload per-row subform files
   let uploads = { attempted: false, results: [] };
   if (ok && recordId) {
     uploads = await uploadSubformFiles(recordId, created, files, token);
   }
 
-  return { ok, status: res.status, data: respData, recordId, resolved: { vendorId, rfqId }, uploads };
+  return {
+    ok,
+    status: res.status,
+    data: respData,
+    recordId,
+    resolved: { vendorId, rfqId, itemMasters: resolvedItemMasters },
+    uploads,
+  };
 }
