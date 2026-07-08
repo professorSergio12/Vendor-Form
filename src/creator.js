@@ -173,24 +173,37 @@ async function getFirstSubformRowId(recordId, token) {
   return extractSubformRowId(rec);
 }
 
-function buildUploadUrls(recordId, subRowId, fieldName) {
+function buildUploadAttempts(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
   const dotted = `${subform()}.${fieldName}`;
   return [
-    // JS SDK maps subform uploads to the standard upload API:
-    // id = subform row, field_name = Subform.Field, parent_id = parent record.
-    `${base}/${subRowId}/${dotted}/upload?parent_id=${recordId}`,
-    // Mirror of the download-from-subform path with /upload instead of /download.
-    `${base}/${recordId}/${dotted}/${subRowId}/upload`,
-    // Parent record + dotted field only (some accounts accept this shape).
-    `${base}/${recordId}/${dotted}/upload?subform_record_id=${subRowId}`,
+    {
+      label: "subform-row + parent_id body",
+      url: `${base}/${subRowId}/${dotted}/upload`,
+      extraFields: { parent_id: recordId },
+    },
+    {
+      label: "subform-row + parent_id query",
+      url: `${base}/${subRowId}/${dotted}/upload?parent_id=${recordId}`,
+      extraFields: {},
+    },
+    {
+      label: "parent path + subform row",
+      url: `${base}/${recordId}/${dotted}/${subRowId}/upload`,
+      extraFields: {},
+    },
   ];
 }
 
 function describeUploadError(status, data, raw) {
   const code = data?.code;
-  const msg = data?.message || data?.error || raw || "upload failed";
+  const msg =
+    data?.message ||
+    data?.description ||
+    data?.error ||
+    (typeof raw === "string" && raw.trim() ? raw : "") ||
+    "upload failed";
   if (code === 2945 || /scope|oauth/i.test(String(msg))) {
     return `${msg} (add ZohoCreator.report.CREATE scope to refresh token)`;
   }
@@ -204,19 +217,21 @@ function describeUploadError(status, data, raw) {
  * Requires the ZohoCreator.report.CREATE scope on the refresh token.
  */
 async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
-  const urls = buildUploadUrls(recordId, subRowId, fieldName);
+  const attempts = buildUploadAttempts(recordId, subRowId, fieldName);
+  const failures = [];
 
-  let last = { ok: false, field: fieldName, status: 0, data: {}, raw: "" };
-
-  for (const url of urls) {
+  for (const attempt of attempts) {
     const fd = new FormData();
+    Object.entries(attempt.extraFields).forEach(([key, value]) => {
+      fd.append(key, String(value));
+    });
     fd.append("file", file.buffer, {
       filename: file.originalname || "upload.bin",
       contentType: file.mimetype || "application/octet-stream",
     });
 
     try {
-      const res = await axios.post(url, fd, {
+      const res = await axios.post(attempt.url, fd, {
         headers: {
           Authorization: `Zoho-oauthtoken ${token}`,
           ...fd.getHeaders(),
@@ -231,26 +246,40 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
       const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
 
       if (ok) {
-        return { ok: true, field: fieldName, status: res.status, data, url };
+        return { ok: true, field: fieldName, status: res.status, data, url: attempt.url };
       }
 
-      last = { ok: false, field: fieldName, status: res.status, data, raw, url };
-      console.error(`Upload to ${fieldName} failed via ${url}:`, data || raw);
+      const failure = {
+        ok: false,
+        field: fieldName,
+        status: res.status,
+        data,
+        raw,
+        url: attempt.url,
+        label: attempt.label,
+      };
+      failures.push(failure);
+      console.error(
+        `Upload to ${fieldName} failed (${attempt.label}) via ${attempt.url}:`,
+        data || raw
+      );
     } catch (e) {
-      last = {
+      failures.push({
         ok: false,
         field: fieldName,
         status: 0,
         data: {},
         raw: "",
-        url,
+        url: attempt.url,
+        label: attempt.label,
         error: e.message,
-      };
-      console.error(`Upload to ${fieldName} threw via ${url}:`, e);
+      });
+      console.error(`Upload to ${fieldName} threw (${attempt.label}) via ${attempt.url}:`, e);
     }
   }
 
-  return last;
+  const best = failures.find((f) => f.data?.description || f.data?.message) || failures[0];
+  return best || { ok: false, field: fieldName, status: 0, data: {}, raw: "" };
 }
 
 /*
