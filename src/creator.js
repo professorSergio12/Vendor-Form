@@ -32,6 +32,7 @@ const DATASHEET_FIELD = process.env.CREATOR_DATASHEET_FIELD || "Datasheet";
 // Reports + match fields used to resolve the lookups.
 const VENDOR_REPORT = process.env.CREATOR_VENDOR_REPORT || "Vendor_Master_Report";
 const VENDOR_MATCH_FIELD = process.env.CREATOR_VENDOR_MATCH_FIELD || "Vendor_Name";
+const VENDOR_CODE_FIELD = process.env.CREATOR_VENDOR_CODE_FIELD || "Vendor_Code";
 const RFQ_REPORT = process.env.CREATOR_RFQ_REPORT || "RFQ1";
 const RFQ_MATCH_FIELD = process.env.CREATOR_RFQ_MATCH_FIELD || "RFQ_Number";
 
@@ -64,6 +65,19 @@ function formatSubmissionDate(d = new Date()) {
   return `${p(ist.getDate())}-${MONTHS[ist.getMonth()]}-${ist.getFullYear()} ${p(ist.getHours())}:${p(ist.getMinutes())}:${p(ist.getSeconds())}`;
 }
 
+/* Confirm a record id exists in a report before using it in a lookup field. */
+async function validateReportRecordId(reportLink, recordId, token) {
+  if (!isRecordId(recordId)) return null;
+  const url =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${reportLink}` +
+    `/${recordId}?field_config=all`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  return data.code === 3000 ? String(recordId) : null;
+}
+
 /* Look up a record ID from a report where matchField == value. */
 async function resolveRecordId(reportLink, matchField, value, token) {
   if (!value) return null;
@@ -82,20 +96,32 @@ async function resolveRecordId(reportLink, matchField, value, token) {
   return null;
 }
 
-/* Resolve the Vendor_Master lookup: prefer explicit id, else match by name. */
+/* Resolve the Vendor_Master lookup: validate explicit ids, else match by name/code. */
 async function resolveVendorId(p, token) {
-  if (isRecordId(p.vendorRecordId)) return String(p.vendorRecordId);
-  if (isRecordId(p.vendorId)) return String(p.vendorId);
-  const byName = await resolveRecordId(VENDOR_REPORT, VENDOR_MATCH_FIELD, p.vendorName, token);
-  if (byName) return byName;
-  // Some links pass the code in vendorId; try matching that too.
-  return resolveRecordId(VENDOR_REPORT, VENDOR_MATCH_FIELD, p.vendorId, token);
+  for (const candidate of [p.vendorRecordId, p.vendorId]) {
+    const valid = await validateReportRecordId(VENDOR_REPORT, candidate, token);
+    if (valid) return valid;
+  }
+
+  for (const value of [p.vendorName, p.vendorId]) {
+    const byName = await resolveRecordId(VENDOR_REPORT, VENDOR_MATCH_FIELD, value, token);
+    if (byName) return byName;
+    const byCode = await resolveRecordId(VENDOR_REPORT, VENDOR_CODE_FIELD, value, token);
+    if (byCode) return byCode;
+  }
+  return null;
 }
 
-/* Resolve the RFQ_ID lookup: prefer explicit id, else match by RFQ number. */
+/* Resolve the RFQ_ID lookup: validate explicit id, else match by RFQ number. */
 async function resolveRfqId(p, token) {
-  if (isRecordId(p.rfqRecordId)) return String(p.rfqRecordId);
+  const valid = await validateReportRecordId(RFQ_REPORT, p.rfqRecordId, token);
+  if (valid) return valid;
   return resolveRecordId(RFQ_REPORT, RFQ_MATCH_FIELD, p.rfqNumber, token);
+}
+
+export function formatCreatorError(data) {
+  if (Array.isArray(data?.error) && data.error.length) return data.error.join("; ");
+  return data?.message || data?.description || "Zoho Creator rejected the submission.";
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

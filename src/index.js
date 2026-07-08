@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { createQuotationRecord } from "./creator.js";
+import { createQuotationRecord, formatCreatorError } from "./creator.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -78,8 +78,9 @@ app.post("/api/quotations", quotationUpload, async (req, res) => {
     console.error("Creator rejected submission:", result.data);
     return res.status(502).json({
       ok: false,
-      message: result.data?.message || "Zoho Creator rejected the submission.",
+      message: formatCreatorError(result.data),
       detail: result.data,
+      resolved: result.resolved,
     });
   } catch (err) {
     console.error("Submission error:", err);
