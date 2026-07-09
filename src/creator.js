@@ -4,8 +4,8 @@
  * Parent: RFQ, Vendor_Master, Submission_Date, Status, Margin,
  *         Total_Amount (grand total), Delivery_Date, Currency
  *
- * Subform Quotation_Items: Description, Quantity, Unit_Price, GST,
- *         Total_Amount (line), Delivery_Date, Currency, Remarks,
+ * Subform Quotation_Items: Description, Quantity, Unit_Price, GST (%),
+ *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
  *         Item_Master, Attachment, Datasheet
  */
 import { getAccessToken } from "./zohoToken.js";
@@ -48,6 +48,23 @@ const VS_EMAIL_SENT = "RFQ_Email_Sent";
 const VS_EMAIL_DATE = "Email_Sent_Date";
 const VS_RESPONSE = "Vendor_Response_Status";
 const VENDOR_RESPONSE_RECEIVED = "Received";
+
+// Quotation_Items > Currency dropdown — must match Creator choice labels exactly.
+const CREATOR_CURRENCY_CHOICES = {
+  INR: "INR - Indian Rupee",
+  USD: "USD - US Dollar",
+  EUR: "EUR - Euro",
+  AED: "AED - UAE Dirham",
+  JPY: "JPY - Japanese Yen",
+  GBP: "GBP - British Pound Sterling",
+  SAR: "SAR - Saudi Riyal",
+  SGD: "SGD - Singapore Dollar",
+};
+
+function mapCreatorCurrency(code) {
+  const key = String(code || "INR").trim().toUpperCase();
+  return CREATOR_CURRENCY_CHOICES[key] || CREATOR_CURRENCY_CHOICES.INR;
+}
 
 /* Extracts a numeric value from mixed text (e.g. "Ex-works / 500" -> 500). */
 function num(v, fallback = 0) {
@@ -176,9 +193,9 @@ export function buildSubformRow(p) {
   const row = {
     Description: p.description || "",
     Quantity: qty,
-    Currency: String(p.currency || "INR"),
+    Currency: mapCreatorCurrency(p.currency),
     Unit_Price: unitPrice,
-    GST: gstAmount,
+    GST: gstPct,
     Total_Amount: lineTotal,
     Remarks: p.remarks || "",
   };
@@ -618,9 +635,6 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     Status: defaultStatus(),
   };
 
-  if (flatPayload.currency) {
-    data.Currency = String(flatPayload.currency);
-  }
   const parentDeliveryFormatted = formatCreatorDate(parentDeliveryDate);
   if (parentDeliveryFormatted) {
     data.Delivery_Date = `${parentDeliveryFormatted} 00:00:00`;
