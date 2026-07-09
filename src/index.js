@@ -90,7 +90,7 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
           : null,
       });
     }
-    console.error("Creator rejected submission:", result.data);
+    console.error("Creator rejected submission:", JSON.stringify(result.data, null, 2));
     return res.status(502).json({
       ok: false,
       message: formatCreatorError(result.data),

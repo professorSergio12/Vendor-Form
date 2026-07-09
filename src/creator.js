@@ -20,6 +20,7 @@ const app = () => process.env.CREATOR_APP_LINK_NAME;
 const form = () => process.env.CREATOR_FORM_LINK_NAME || "Vendor_Quotations";
 const subform = () => process.env.CREATOR_SUBFORM_LINK_NAME || "Quotation_Items";
 const rfqField = () => process.env.CREATOR_RFQ_FIELD || "RFQ";
+const vendorField = () => process.env.CREATOR_VENDOR_FIELD || "Vendor_Master";
 const defaultStatus = () => process.env.CREATOR_DEFAULT_STATUS || "Pending Review";
 
 // Report that displays Vendor_Quotations records — used to read back the
@@ -38,6 +39,10 @@ const VENDOR_CODE_FIELD = process.env.CREATOR_VENDOR_CODE_FIELD || "Vendor_Code"
 const RFQ_REPORT = process.env.CREATOR_RFQ_REPORT || "RFQ1";
 const RFQ_MATCH_FIELD = process.env.CREATOR_RFQ_MATCH_FIELD || "RFQ_Number";
 const ITEM_MASTER_REPORT = process.env.CREATOR_ITEM_MASTER_REPORT || "Items_Report";
+const ITEM_MASTER_NAME_FIELD = process.env.CREATOR_ITEM_MASTER_NAME_FIELD || "Name";
+const ITEM_MASTER_SKU_FIELD = process.env.CREATOR_ITEM_MASTER_SKU_FIELD || "SKU";
+const ITEM_MASTER_CODE_FIELD = process.env.CREATOR_ITEM_MASTER_CODE_FIELD || "Product_Code";
+const RFQ_PRODUCTS_SUBFORM = process.env.CREATOR_RFQ_PRODUCTS_SUBFORM || "RFQ_Products";
 
 // RFQ > Vendor_Selection subform — updated when vendor submits a quote.
 const RFQ_VENDOR_SELECTION =
@@ -167,10 +172,57 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* Resolve Item_Master lookup from the item / product record id in the email link. */
 async function resolveItemMasterId(p, token) {
-  for (const candidate of [p.itemMasterId, p.itemId]) {
-    const valid = await validateReportRecordId(ITEM_MASTER_REPORT, candidate, token);
+  async function acceptIfValid(id) {
+    if (!id) return null;
+    const valid = await validateReportRecordId(ITEM_MASTER_REPORT, id, token);
     if (valid) return valid;
+    if (isRecordId(id)) {
+      console.warn(
+        `Item_Master id ${id} not found in ${ITEM_MASTER_REPORT}; using as lookup anyway.`
+      );
+      return String(id);
+    }
+    return null;
   }
+
+  for (const candidate of [p.itemMasterId, p.itemId]) {
+    const resolved = await acceptIfValid(candidate);
+    if (resolved) return resolved;
+  }
+
+  for (const [field, value] of [
+    [ITEM_MASTER_NAME_FIELD, p.product],
+    [ITEM_MASTER_SKU_FIELD, p.sku],
+    [ITEM_MASTER_CODE_FIELD, p.itemId],
+  ]) {
+    if (!value) continue;
+    const id = await resolveRecordId(ITEM_MASTER_REPORT, field, value, token);
+    const resolved = await acceptIfValid(id);
+    if (resolved) return resolved;
+  }
+
+  if (p.rfqRecordId) {
+    const rfqRec = await fetchRfqRecord(p.rfqRecordId, token);
+    const rows = rfqRec?.[RFQ_PRODUCTS_SUBFORM];
+    if (Array.isArray(rows) && rows.length) {
+      const needle = String(p.product || "").trim().toLowerCase();
+      for (const row of rows) {
+        const im = row.Product || row.Item_Master;
+        const label = String(
+          (typeof im === "object" && (im.display_value || im.zc_display_value)) || ""
+        )
+          .trim()
+          .toLowerCase();
+        const id = lookupId(im);
+        if (!id) continue;
+        if (!needle || label === needle) {
+          const resolved = await acceptIfValid(id);
+          if (resolved) return resolved;
+        }
+      }
+    }
+  }
+
   return null;
 }
 
@@ -191,14 +243,19 @@ export function buildSubformRow(p) {
   const lineTotal = Math.round((lineSubtotal + gstAmount) * 100) / 100;
 
   const row = {
-    Description: p.description || "",
     Quantity: qty,
     Currency: mapCreatorCurrency(p.currency),
     Unit_Price: unitPrice,
     GST: gstPct,
     Total_Amount: lineTotal,
-    Remarks: p.remarks || "",
   };
+
+  if (p.description) {
+    row.Description = p.description;
+  }
+  if (p.remarks) {
+    row.Remarks = p.remarks;
+  }
 
   const deliveryFormatted = formatCreatorDate(p.deliveryDate);
   if (deliveryFormatted) {
@@ -610,38 +667,39 @@ export async function createQuotationRecord(flatPayload, files = {}) {
 
   const subformRows = [];
   const resolvedItemMasters = [];
-  let parentTotal = 0;
-  let parentDeliveryDate = null;
 
   for (const line of linePayloads) {
-    const itemMasterId = await resolveItemMasterId(line, token);
+    const itemMasterId = await resolveItemMasterId(
+      {
+        ...line,
+        rfqRecordId: flatPayload.rfqRecordId,
+      },
+      token
+    );
     resolvedItemMasters.push(itemMasterId);
+    if (!itemMasterId) {
+      console.warn("Item_Master unresolved for line:", {
+        itemId: line.itemId,
+        product: line.product,
+        rfqRecordId: flatPayload.rfqRecordId,
+      });
+    }
     const built = buildSubformRow({
       ...line,
-      itemMasterId: itemMasterId || null,
+      itemMasterId,
     });
     subformRows.push(built.row);
-    parentTotal += built.lineTotal;
-    if (!parentDeliveryDate && line.deliveryDate) {
-      parentDeliveryDate = line.deliveryDate;
-    }
   }
 
   const data = {
     Submission_Date: formatSubmissionDate(),
     [subform()]: subformRows,
-    Total_Amount: Math.round(parentTotal * 100) / 100,
     Margin: 0,
     Status: defaultStatus(),
   };
 
-  const parentDeliveryFormatted = formatCreatorDate(parentDeliveryDate);
-  if (parentDeliveryFormatted) {
-    data.Delivery_Date = `${parentDeliveryFormatted} 00:00:00`;
-  }
-
   // Only set lookups we could resolve (avoids "Invalid column value").
-  if (vendorId) data.Vendor_Master = vendorId;
+  if (vendorId) data[vendorField()] = vendorId;
   if (rfqId) data[rfqField()] = rfqId;
 
   const url = `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/form/${form()}`;
