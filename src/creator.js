@@ -1,11 +1,12 @@
 /*
- * Builds the Zoho Creator v2.1 "Add Records" payload from the flat quotation
- * fields the React form submits, and posts it to the Vendor_Quotations form.
+ * Vendor_Quotations — Creator link names (confirmed):
  *
- * RFQ_ID and Vendor_Master are LOOKUP fields — they need the linked record's
- * numeric ID, not a text code. We resolve them:
- *   - if a numeric record id is supplied, use it directly;
- *   - otherwise look the record up by name / number via a report (report.READ).
+ * Parent: RFQ, Vendor_Master, Submission_Date, Status, Margin,
+ *         Total_Amount (grand total), Delivery_Date, Currency
+ *
+ * Subform Quotation_Items: Description, Quantity, Unit_Price, GST,
+ *         Total_Amount (line), Delivery_Date, Currency, Remarks,
+ *         Item_Master, Attachment, Datasheet
  */
 import { getAccessToken } from "./zohoToken.js";
 import axios from "axios";
@@ -18,6 +19,7 @@ const owner = () => process.env.CREATOR_ACCOUNT_OWNER;
 const app = () => process.env.CREATOR_APP_LINK_NAME;
 const form = () => process.env.CREATOR_FORM_LINK_NAME || "Vendor_Quotations";
 const subform = () => process.env.CREATOR_SUBFORM_LINK_NAME || "Quotation_Items";
+const rfqField = () => process.env.CREATOR_RFQ_FIELD || "RFQ";
 const defaultStatus = () => process.env.CREATOR_DEFAULT_STATUS || "Pending Review";
 
 // Report that displays Vendor_Quotations records — used to read back the
@@ -58,6 +60,15 @@ function intOnly(v, fallback = 0) {
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/* dd-MMM-yyyy for Creator date / date-time fields. */
+function formatCreatorDate(isoDate) {
+  if (!isoDate) return null;
+  const d = new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return String(isoDate);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
+}
 
 /* dd-MMM-yyyy HH:mm:ss in IST (matches the module's date-time format). */
 function formatSubmissionDate(d = new Date()) {
@@ -145,39 +156,33 @@ function extractAllSubformRowIds(record) {
 }
 
 export function buildSubformRow(p) {
-  const unitPrice = num(p.price);
   const qty = num(p.quantity, 1);
-  const gstPct = num(p.gst);
-  const freight = num(p.freight);
-  const lineTotal = unitPrice * qty;
-  const gstAmount = (lineTotal * gstPct) / 100;
-  const totalAmount = Math.round((lineTotal + gstAmount + freight) * 100) / 100;
-
-  const extras = [
-    p.validity ? `Validity: ${p.validity}` : "",
-    p.leadTime ? `Lead time: ${p.leadTime}` : "",
-    p.remarks || "",
-  ]
-    .filter(Boolean)
-    .join(" | ");
+  const gstPct = num(p.gst, 18);
+  const unitPrice = num(p.price);
+  const lineSubtotal = unitPrice * qty;
+  const gstAmount = Math.round(((lineSubtotal * gstPct) / 100) * 100) / 100;
+  const lineTotal = Math.round((lineSubtotal + gstAmount) * 100) / 100;
 
   const row = {
-    Product: p.product || "",
+    Description: p.description || "",
     Quantity: qty,
-    Currency: p.currency || "INR",
-    Freight: freight,
+    Currency: String(p.currency || "INR"),
     Unit_Price: unitPrice,
-    GST: gstPct,
-    Total_Amount: totalAmount,
-    Remarks: extras,
-    Inquiry_Item_from_CRM: String(p.inquiryItem || p.itemId || ""),
+    GST: gstAmount,
+    Total_Amount: lineTotal,
+    Remarks: p.remarks || "",
   };
+
+  const deliveryFormatted = formatCreatorDate(p.deliveryDate);
+  if (deliveryFormatted) {
+    row.Delivery_Date = `${deliveryFormatted} 00:00:00`;
+  }
 
   if (p.itemMasterId) {
     row.Item_Master = p.itemMasterId;
   }
 
-  return row;
+  return { row, lineSubtotal, gstAmount, lineTotal };
 }
 
 /*
@@ -422,10 +427,10 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           product: line.product,
           quantity: line.quantity,
           unit: line.unit,
+          description: line.description,
+          deliveryDate: line.deliveryDate,
+          totalAmount: line.totalAmount,
           price: line.price,
-          leadTime: line.leadTime,
-          validity: line.validity,
-          freight: line.freight,
           gst: line.gst,
           remarks: line.remarks,
           uniqueId: line.uniqueId || flatPayload.uniqueId,
@@ -442,26 +447,42 @@ export async function createQuotationRecord(flatPayload, files = {}) {
 
   const subformRows = [];
   const resolvedItemMasters = [];
+  let parentTotal = 0;
+  let parentDeliveryDate = null;
+
   for (const line of linePayloads) {
     const itemMasterId = await resolveItemMasterId(line, token);
     resolvedItemMasters.push(itemMasterId);
-    subformRows.push(
-      buildSubformRow({
-        ...line,
-        itemMasterId: itemMasterId || null,
-      })
-    );
+    const built = buildSubformRow({
+      ...line,
+      itemMasterId: itemMasterId || null,
+    });
+    subformRows.push(built.row);
+    parentTotal += built.lineTotal;
+    if (!parentDeliveryDate && line.deliveryDate) {
+      parentDeliveryDate = line.deliveryDate;
+    }
   }
 
   const data = {
     Submission_Date: formatSubmissionDate(),
     [subform()]: subformRows,
+    Total_Amount: Math.round(parentTotal * 100) / 100,
     Margin: 0,
     Status: defaultStatus(),
   };
+
+  if (flatPayload.currency) {
+    data.Currency = String(flatPayload.currency);
+  }
+  const parentDeliveryFormatted = formatCreatorDate(parentDeliveryDate);
+  if (parentDeliveryFormatted) {
+    data.Delivery_Date = `${parentDeliveryFormatted} 00:00:00`;
+  }
+
   // Only set lookups we could resolve (avoids "Invalid column value").
   if (vendorId) data.Vendor_Master = vendorId;
-  if (rfqId) data.RFQ_ID = rfqId;
+  if (rfqId) data[rfqField()] = rfqId;
 
   const url = `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/form/${form()}`;
   const res = await fetch(url, {
