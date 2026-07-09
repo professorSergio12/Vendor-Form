@@ -24,7 +24,7 @@ npm run dev            # http://localhost:8787
 | --- | --- |
 | `ZOHO_DC` | Your domain — `in` for zoho.in, `com` for zoho.com, etc. |
 | `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` | https://api-console.zoho.in → **Self Client** |
-| `ZOHO_REFRESH_TOKEN` | Generate a grant code (scope `ZohoCreator.form.CREATE`) then exchange it once (see below) |
+| `ZOHO_REFRESH_TOKEN` | Generate a grant code (scopes `ZohoCreator.form.CREATE`, `ZohoCreator.report.UPDATE`) then exchange it once (see below) |
 | `CREATOR_ACCOUNT_OWNER` | The login name after `/appbuilder/` in your Creator app URL |
 | `CREATOR_APP_LINK_NAME` | Your app link name (e.g. `airatrex`) |
 | `ALLOWED_ORIGINS` | Your form's origin(s), comma-separated |
@@ -54,7 +54,9 @@ Copy `refresh_token` from the response into `.env` as `ZOHO_REFRESH_TOKEN`.
 The POST body is the flat object the React form sends (`rfqNumber`, `itemId`,
 `vendorId`, `product`, `quantity`, `price`, `currency`, `gst`, `freight`,
 `validity`, `remarks`, `uniqueId`). `src/creator.js` maps it to the Creator
-`data` + `Quotation_Items` subform payload and computes `Total_Amount`.
+`data` + `Quotation_Items` subform payload, computes `Total_Amount`, and then
+**PATCHes the parent RFQ** so matching `Vendor_Selection` rows get
+`Vendor_Response_Status = Received`.
 
 ## Deploy
 

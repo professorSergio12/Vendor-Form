@@ -39,6 +39,16 @@ const RFQ_REPORT = process.env.CREATOR_RFQ_REPORT || "RFQ1";
 const RFQ_MATCH_FIELD = process.env.CREATOR_RFQ_MATCH_FIELD || "RFQ_Number";
 const ITEM_MASTER_REPORT = process.env.CREATOR_ITEM_MASTER_REPORT || "Items_Report";
 
+// RFQ > Vendor_Selection subform — updated when vendor submits a quote.
+const RFQ_VENDOR_SELECTION =
+  process.env.CREATOR_RFQ_VENDOR_SELECTION || "Vendor_Selection";
+const VS_PRODUCTS = "Products_Name1";
+const VS_VENDOR = "Vendor_Master";
+const VS_EMAIL_SENT = "RFQ_Email_Sent";
+const VS_EMAIL_DATE = "Email_Sent_Date";
+const VS_RESPONSE = "Vendor_Response_Status";
+const VENDOR_RESPONSE_RECEIVED = "Received";
+
 /* Extracts a numeric value from mixed text (e.g. "Ex-works / 500" -> 500). */
 function num(v, fallback = 0) {
   if (v === null || v === undefined || v === "") return fallback;
@@ -404,6 +414,142 @@ export function parseFilesByRow(reqFiles = []) {
   return byRow;
 }
 
+function lookupId(val) {
+  if (val == null || val === "") return "";
+  if (typeof val === "object") {
+    const id = val.ID ?? val.id;
+    return id != null && id !== "" ? String(id) : "";
+  }
+  return String(val);
+}
+
+function normalizeVendorIds(vendorMaster) {
+  if (vendorMaster == null) return [];
+  if (Array.isArray(vendorMaster)) {
+    return vendorMaster.map(lookupId).filter(Boolean);
+  }
+  const one = lookupId(vendorMaster);
+  return one ? [one] : [];
+}
+
+async function fetchRfqRecord(rfqRecordId, token) {
+  if (!isRecordId(rfqRecordId)) return null;
+  const url =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${RFQ_REPORT}` +
+    `/${rfqRecordId}?field_config=all`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (data.code !== 3000) {
+    console.error("fetchRfqRecord failed:", data);
+    return null;
+  }
+  return Array.isArray(data.data) ? data.data[0] : data.data;
+}
+
+function collectSubmittedItemIds(linePayloads, resolvedItemMasters) {
+  const ids = new Set();
+  resolvedItemMasters.forEach((id) => {
+    if (id) ids.add(String(id));
+  });
+  linePayloads.forEach((line) => {
+    for (const candidate of [line.itemMasterId, line.itemId]) {
+      if (candidate) ids.add(String(candidate));
+    }
+  });
+  return ids;
+}
+
+/*
+ * After a vendor quotation is saved, mark matching RFQ Vendor_Selection rows
+ * as Vendor_Response_Status = "Received".
+ */
+export async function markVendorQuoteReceived({
+  rfqRecordId,
+  vendorRecordId,
+  linePayloads,
+  resolvedItemMasters,
+  token,
+}) {
+  if (!rfqRecordId || !vendorRecordId) {
+    return { attempted: false, ok: false, reason: "missing rfqRecordId or vendorRecordId" };
+  }
+
+  const rfqRec = await fetchRfqRecord(rfqRecordId, token);
+  if (!rfqRec) {
+    return { attempted: true, ok: false, error: "Could not read RFQ record." };
+  }
+
+  const existingRows = rfqRec[RFQ_VENDOR_SELECTION];
+  if (!Array.isArray(existingRows) || !existingRows.length) {
+    return { attempted: true, ok: false, error: "RFQ has no Vendor_Selection rows." };
+  }
+
+  const vendorId = String(vendorRecordId);
+  const submittedItemIds = collectSubmittedItemIds(linePayloads, resolvedItemMasters);
+  let rowsUpdated = 0;
+
+  const updatedRows = existingRows.map((vsRow) => {
+    const rowMap = {};
+    if (vsRow.ID != null) rowMap.ID = vsRow.ID;
+
+    const productId = lookupId(vsRow[VS_PRODUCTS]);
+    const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
+
+    if (productId) rowMap[VS_PRODUCTS] = productId;
+    if (vendorIds.length) rowMap[VS_VENDOR] = vendorIds;
+    if (vsRow[VS_EMAIL_SENT]) rowMap[VS_EMAIL_SENT] = vsRow[VS_EMAIL_SENT];
+    if (vsRow[VS_EMAIL_DATE]) rowMap[VS_EMAIL_DATE] = vsRow[VS_EMAIL_DATE];
+    rowMap[VS_RESPONSE] = vsRow[VS_RESPONSE] || "Pending";
+
+    const vendorInRow = vendorIds.includes(vendorId);
+    const itemQuoted =
+      submittedItemIds.size === 0 || (productId && submittedItemIds.has(productId));
+
+    if (vendorInRow && itemQuoted) {
+      rowMap[VS_RESPONSE] = VENDOR_RESPONSE_RECEIVED;
+      rowsUpdated += 1;
+    }
+
+    return rowMap;
+  });
+
+  if (!rowsUpdated) {
+    return {
+      attempted: true,
+      ok: false,
+      error: "No Vendor_Selection row matched vendor + quoted items.",
+    };
+  }
+
+  const patchUrl =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${RFQ_REPORT}/${rfqRecordId}`;
+  const patchRes = await fetch(patchUrl, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ data: { [RFQ_VENDOR_SELECTION]: updatedRows } }),
+  });
+  const patchData = await patchRes.json().catch(() => ({}));
+  const ok = patchRes.ok && patchData.code === 3000;
+
+  if (!ok) {
+    console.error("markVendorQuoteReceived patch failed:", patchData);
+    return {
+      attempted: true,
+      ok: false,
+      rowsUpdated,
+      error: formatCreatorError(patchData),
+      detail: patchData,
+    };
+  }
+
+  return { attempted: true, ok: true, rowsUpdated, detail: patchData };
+}
+
 export async function createQuotationRecord(flatPayload, files = {}) {
   const token = await getAccessToken();
 
@@ -505,6 +651,18 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     uploads = await uploadSubformFiles(recordId, created, files, token);
   }
 
+  // Step 3: mark RFQ Vendor_Selection as Received for this vendor + items
+  let vendorStatus = { attempted: false, ok: false };
+  if (ok) {
+    vendorStatus = await markVendorQuoteReceived({
+      rfqRecordId: flatPayload.rfqRecordId || rfqId,
+      vendorRecordId: flatPayload.vendorRecordId || vendorId,
+      linePayloads,
+      resolvedItemMasters,
+      token,
+    });
+  }
+
   return {
     ok,
     status: res.status,
@@ -512,5 +670,6 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     recordId,
     resolved: { vendorId, rfqId, itemMasters: resolvedItemMasters },
     uploads,
+    vendorStatus,
   };
 }

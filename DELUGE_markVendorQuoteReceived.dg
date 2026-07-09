@@ -1,0 +1,92 @@
+/*
+ * Optional Deluge reference — NOT required if quotation-backend handles the update.
+ *
+ * The Render backend now PATCHes RFQ Vendor_Selection directly after a vendor
+ * submits the React form. Keep this file only if you later want a Creator
+ * Custom API instead of the Node proxy.
+ *
+ * Custom API params (all string):
+ *   rfqRecordId, vendorRecordId, itemIds  (pipe-separated Item Master IDs)
+ */
+string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string itemIds)
+{
+	itemIdList = List();
+	if(itemIds != null && itemIds != "")
+	{
+		for each part in itemIds.toList("|")
+		{
+			id = ifnull(part + "", "").trim();
+			if(id != "")
+			{
+				itemIdList.add(id);
+			}
+		}
+	}
+
+	rfqRec = RFQ[ID == rfqRecordId.toLong()];
+	if(rfqRec.count() == 0)
+	{
+		return "error: RFQ not found";
+	}
+
+	updatedRows = List();
+	rowsUpdated = 0;
+
+	for each vsRow in rfqRec.Vendor_Selection
+	{
+		rowMap = Map();
+		if(vsRow.ID != null)
+		{
+			rowMap.put("ID", vsRow.ID);
+		}
+
+		rowMap.put("Products_Name1", vsRow.Products_Name1);
+		rowMap.put("Vendor_Master", vsRow.Vendor_Master);
+		rowMap.put("RFQ_Email_Sent", ifnull(vsRow.RFQ_Email_Sent, "Not Sent"));
+		rowMap.put("Email_Sent_Date", ifnull(vsRow.Email_Sent_Date, ""));
+		rowMap.put("Vendor_Response_Status", ifnull(vsRow.Vendor_Response_Status, "Pending"));
+
+		productId = ifnull(vsRow.Products_Name1, "").toString();
+		vendorInRow = false;
+		for each v in vsRow.Vendor_Master
+		{
+			if(v.toString() == vendorRecordId.toString())
+			{
+				vendorInRow = true;
+			}
+		}
+
+		itemQuoted = itemIdList.isEmpty();
+		for each eid in itemIdList
+		{
+			if(productId == eid.toString())
+			{
+				itemQuoted = true;
+			}
+		}
+
+		if(vendorInRow && itemQuoted)
+		{
+			rowMap.put("Vendor_Response_Status", "Received");
+			rowsUpdated = rowsUpdated + 1;
+		}
+
+		updatedRows.add(rowMap);
+	}
+
+	dataMap = Map();
+	dataMap.put("Vendor_Selection", updatedRows);
+	otherParams = Map();
+
+	updateResp = zoho.creator.updateRecord(
+		"airatrex959",
+		"airatrex",
+		"RFQ1",
+		rfqRecordId.toLong(),
+		dataMap,
+		otherParams,
+		"zoho_creator_connection"
+	);
+
+	return "success: " + rowsUpdated + " row(s) marked Received — " + updateResp;
+}

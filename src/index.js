@@ -71,15 +71,22 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
     if (result.ok) {
       const hadFiles = Object.keys(filesByRow).length > 0;
       const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
+      const vendorStatusFailed =
+        result.vendorStatus?.attempted && !result.vendorStatus?.ok;
       return res.json({
         ok: true,
         uniqueId: p.uniqueId,
         recordId: result.recordId,
         resolved: result.resolved,
         uploads: result.uploads,
+        vendorStatus: result.vendorStatus,
         uploadWarning: uploadFailed
           ? result.uploads.error ||
             "Quotation saved but one or more files could not be uploaded."
+          : null,
+        vendorStatusWarning: vendorStatusFailed
+          ? result.vendorStatus.error ||
+            "Quotation saved but RFQ Vendor_Response_Status was not updated."
           : null,
       });
     }
