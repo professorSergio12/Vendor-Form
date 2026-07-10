@@ -498,7 +498,82 @@ function lookupId(val) {
   return String(val);
 }
 
+function extractPlainValue(val) {
+  if (val == null || val === "") return "";
+  if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
+    return String(val).trim();
+  }
+  if (typeof val === "object") {
+    return String(
+      val.display_value ?? val.zc_display_value ?? val.value ?? val.name ?? ""
+    ).trim();
+  }
+  return String(val).trim();
+}
+
+/*
+ * Build a Creator-safe Vendor_Selection row for PATCH.
+ * Only sends lookup IDs + status. Omits Email_Sent_Date / RFQ_Email_Sent —
+ * round-tripping those API values causes Zoho error 2930.
+ */
+function buildVsRowForPatch(vsRow, responseStatus) {
+  const rowMap = {};
+  if (vsRow.ID != null) rowMap.ID = String(vsRow.ID);
+
+  const productId = extractVsProductId(vsRow);
+  const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
+
+  if (productId) rowMap[VS_PRODUCTS] = productId;
+  if (vendorIds.length) rowMap[VS_VENDOR] = vendorIds;
+
+  rowMap[VS_RESPONSE] = responseStatus || extractPlainValue(vsRow[VS_RESPONSE]) || "Pending";
+  return rowMap;
+}
+
+async function patchRfqVendorSelection(rfqRecordId, updatedRows, token, options = {}) {
+  const patchUrl =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${RFQ_REPORT}/${rfqRecordId}`;
+  const body = {
+    data: { [RFQ_VENDOR_SELECTION]: updatedRows },
+    skip_workflow: ["form_workflow", "schedules"],
+  };
+  if (options.resultFields?.length) {
+    body.result = { fields: options.resultFields, message: false, tasks: false };
+  }
+
+  const patchRes = await fetch(patchUrl, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const patchData = await patchRes.json().catch(() => ({}));
+  return { ok: patchRes.ok && patchData.code === 3000, patchData, body };
+}
+
 function normalizeVendorIds(vendorMaster) {
+  if (vendorMaster == null) return [];
+  if (Array.isArray(vendorMaster)) {
+    return vendorMaster.map(lookupId).filter(Boolean);
+  }
+  if (typeof vendorMaster === "string") {
+    const text = vendorMaster.trim();
+    if (!text) return [];
+    if (text.includes(",")) {
+      return text
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    }
+    const one = lookupId(text);
+    return one ? [one] : isRecordId(text) ? [text] : [];
+  }
+  const one = lookupId(vendorMaster);
+  return one ? [one] : [];
+}
+
   if (vendorMaster == null) return [];
   if (Array.isArray(vendorMaster)) {
     return vendorMaster.map(lookupId).filter(Boolean);
@@ -696,17 +771,8 @@ export async function markVendorQuoteReceived({
   const matchDebug = [];
 
   const updatedRows = existingRows.map((vsRow) => {
-    const rowMap = {};
-    if (vsRow.ID != null) rowMap.ID = vsRow.ID;
-
     const productId = extractVsProductId(vsRow);
     const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
-
-    if (productId) rowMap[VS_PRODUCTS] = productId;
-    if (vendorIds.length) rowMap[VS_VENDOR] = vendorIds;
-    if (vsRow[VS_EMAIL_SENT]) rowMap[VS_EMAIL_SENT] = vsRow[VS_EMAIL_SENT];
-    if (vsRow[VS_EMAIL_DATE]) rowMap[VS_EMAIL_DATE] = vsRow[VS_EMAIL_DATE];
-    rowMap[VS_RESPONSE] = vsRow[VS_RESPONSE] || "Pending";
 
     const vendorInRow = vendorIds.some((id) => submittingVendorIds.has(String(id)));
     const itemQuoted = rowMatchesSubmittedItems(
@@ -715,8 +781,12 @@ export async function markVendorQuoteReceived({
       submittedProductNames
     );
 
+    const nextStatus =
+      vendorInRow && itemQuoted
+        ? VENDOR_RESPONSE_RECEIVED
+        : extractPlainValue(vsRow[VS_RESPONSE]) || "Pending";
+
     if (vendorInRow && itemQuoted) {
-      rowMap[VS_RESPONSE] = VENDOR_RESPONSE_RECEIVED;
       rowsUpdated += 1;
     } else {
       matchDebug.push({
@@ -728,7 +798,7 @@ export async function markVendorQuoteReceived({
       });
     }
 
-    return rowMap;
+    return buildVsRowForPatch(vsRow, nextStatus);
   });
 
   if (!rowsUpdated) {
@@ -745,21 +815,39 @@ export async function markVendorQuoteReceived({
     };
   }
 
-  const patchUrl =
-    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${RFQ_REPORT}/${rfqRecordId}`;
-  const patchRes = await fetch(patchUrl, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ data: { [RFQ_VENDOR_SELECTION]: updatedRows } }),
-  });
-  const patchData = await patchRes.json().catch(() => ({}));
-  const ok = patchRes.ok && patchData.code === 3000;
+  let patchResult = await patchRfqVendorSelection(rfqRecordId, updatedRows, token);
+
+  // Fallback: minimal patch (ID + Vendor_Response_Status only) if full row fails with 2930
+  if (!patchResult.ok && patchResult.patchData?.code === 2930) {
+    console.warn("Full Vendor_Selection patch failed (2930), retrying status-only…");
+    const statusOnlyRows = existingRows.map((vsRow) => {
+      const productId = extractVsProductId(vsRow);
+      const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
+      const vendorInRow = vendorIds.some((id) => submittingVendorIds.has(String(id)));
+      const itemQuoted = rowMatchesSubmittedItems(
+        vsRow,
+        submittedItemIds,
+        submittedProductNames
+      );
+      const status =
+        vendorInRow && itemQuoted
+          ? VENDOR_RESPONSE_RECEIVED
+          : extractPlainValue(vsRow[VS_RESPONSE]) || "Pending";
+      return {
+        ID: String(vsRow.ID),
+        [VS_RESPONSE]: status,
+      };
+    });
+    patchResult = await patchRfqVendorSelection(rfqRecordId, statusOnlyRows, token, {
+      resultFields: [VS_RESPONSE],
+    });
+  }
+
+  const { ok, patchData, body } = patchResult;
 
   if (!ok) {
     console.error("markVendorQuoteReceived patch failed:", patchData);
+    console.error("PATCH payload:", JSON.stringify(body, null, 2));
     return {
       attempted: true,
       ok: false,
