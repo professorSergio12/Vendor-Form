@@ -1,12 +1,12 @@
 /*
  * Vendor_Quotations — Creator link names (confirmed):
  *
- * Parent: RFQ, Vendor_Master, Submission_Date, Status, Margin,
+ * Parent: RFQ, Vendor_Master, Submission_Date, Margin,
  *         Total_Amount (grand total), Delivery_Date, Currency
  *
  * Subform Quotation_Items: Description, Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
- *         Item_Master, Attachment, Datasheet
+ *         Item_Master, Attachment, Datasheet, Status (per line → Pending Review)
  */
 import { getAccessToken } from "./zohoToken.js";
 import axios from "axios";
@@ -22,6 +22,7 @@ const subform = () => process.env.CREATOR_SUBFORM_LINK_NAME || "Quotation_Items"
 const rfqField = () => process.env.CREATOR_RFQ_FIELD || "RFQ";
 const vendorField = () => process.env.CREATOR_VENDOR_FIELD || "Vendor_Master";
 const defaultStatus = () => process.env.CREATOR_DEFAULT_STATUS || "Pending Review";
+const itemStatusField = () => process.env.CREATOR_ITEM_STATUS_FIELD || "Status";
 
 // Report that displays Vendor_Quotations records — used to read back the
 // subform row IDs after a record is created (needed for subform file upload).
@@ -254,6 +255,7 @@ export function buildSubformRow(p) {
     Unit_Price: unitPrice,
     GST: gstPct,
     Total_Amount: lineTotal,
+    [itemStatusField()]: defaultStatus(),
   };
 
   if (p.description) {
@@ -585,10 +587,15 @@ function parseDelugeMarkResponse(raw) {
       : raw?.result || raw?.message || raw?.description || JSON.stringify(raw || "");
   const rowsMatch = String(text).match(/(\d+)\s+row/i);
   const rowsUpdated = rowsMatch ? Number(rowsMatch[1]) : 0;
+  const lowered = String(text).toLowerCase();
+  const hasEmbeddedFailure =
+    lowered.includes("json_parse_error") ||
+    lowered.includes("error:") ||
+    /"code"\s*:\s*(2945|2930)/.test(String(text));
   const ok =
-    String(text).toLowerCase().includes("success") &&
+    lowered.includes("success") &&
     rowsUpdated > 0 &&
-    !String(text).toLowerCase().includes("error");
+    !hasEmbeddedFailure;
   return { ok, rowsUpdated, message: String(text).trim() };
 }
 
@@ -1122,7 +1129,6 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     Submission_Date: formatSubmissionDate(),
     [subform()]: subformRows,
     Margin: 0,
-    Status: defaultStatus(),
   };
 
   // Only set lookups we could resolve (avoids "Invalid column value").

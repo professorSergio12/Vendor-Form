@@ -1,10 +1,8 @@
 // AiraTrex — markVendorQuoteReceived
-// Paste into Zoho Creator → Functions → markVendorQuoteReceived
-// Then: Microservices → Custom API → Mark_Vendor_Quote_Received
-//   Method: POST | Auth: Public Key | Map function args
+// Paste into Zoho Creator → Functions → markVendorQuoteReceived (EDIT existing — do not create new)
+// Custom API: Mark_Vendor_Quote_Received | POST | Public Key
 //
-// Custom API params (string):
-//   rfqRecordId, vendorRecordId, itemIds (pipe-separated), contactEmail
+// Params: rfqRecordId, vendorRecordId, itemIds (pipe-separated), contactEmail
 
 string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string itemIds, string contactEmail)
 {
@@ -46,23 +44,12 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 		return "error: RFQ not found";
 	}
 
-	updatedRows = List();
 	rowsUpdated = 0;
+	updatedRows = List();
+	statusOnlyRows = List();
 
 	for each vsRow in rfqRec.Vendor_Selection
 	{
-		rowMap = Map();
-		if(vsRow.ID != null)
-		{
-			rowMap.put("ID", vsRow.ID);
-		}
-
-		rowMap.put("Products_Name1", vsRow.Products_Name1);
-		rowMap.put("Vendor_Master", vsRow.Vendor_Master);
-		rowMap.put("RFQ_Email_Sent", ifnull(vsRow.RFQ_Email_Sent, "Not Sent"));
-		rowMap.put("Email_Sent_Date", ifnull(vsRow.Email_Sent_Date, ""));
-		rowMap.put("Vendor_Response_Status", ifnull(vsRow.Vendor_Response_Status, "Pending"));
-
 		productId = "";
 		try
 		{
@@ -76,6 +63,7 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 			productId = ifnull(vsRow.Products_Name1, "").toString();
 		}
 
+		vendorIdList = List();
 		vendorInRow = false;
 		if(vsRow.Vendor_Master != null)
 		{
@@ -90,11 +78,15 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 				{
 					vid = ifnull(v, "").toString();
 				}
-				for each gid in vendorIdsInGroup
+				if(vid != "")
 				{
-					if(vid == gid.toString())
+					vendorIdList.add(vid);
+					for each gid in vendorIdsInGroup
 					{
-						vendorInRow = true;
+						if(vid == gid.toString())
+						{
+							vendorInRow = true;
+						}
 					}
 				}
 			}
@@ -109,13 +101,41 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 			}
 		}
 
+		nextStatus = ifnull(vsRow.Vendor_Response_Status, "Pending");
 		if(vendorInRow && itemQuoted)
 		{
-			rowMap.put("Vendor_Response_Status", "Received");
+			nextStatus = "Received";
 			rowsUpdated = rowsUpdated + 1;
 		}
 
+		rowMap = Map();
+		if(vsRow.ID != null)
+		{
+			rowMap.put("ID", vsRow.ID);
+		}
+		if(productId != "")
+		{
+			rowMap.put("Products_Name1", productId);
+		}
+		if(vendorIdList.size() > 0)
+		{
+			rowMap.put("Vendor_Master", vendorIdList);
+		}
+		rowMap.put("Vendor_Response_Status", nextStatus);
 		updatedRows.add(rowMap);
+
+		statusMap = Map();
+		if(vsRow.ID != null)
+		{
+			statusMap.put("ID", vsRow.ID);
+		}
+		statusMap.put("Vendor_Response_Status", nextStatus);
+		statusOnlyRows.add(statusMap);
+	}
+
+	if(rowsUpdated == 0)
+	{
+		return "error: no matching Vendor_Selection rows";
 	}
 
 	dataMap = Map();
@@ -132,5 +152,48 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 		connectionName
 	);
 
-	return "success: " + rowsUpdated + " row(s) marked Received — " + updateResp;
+	respCode = 0;
+	try
+	{
+		respCode = ifnull(updateResp.get("code"), 0).toLong();
+	}
+	catch (e)
+	{
+		respCode = 0;
+	}
+
+	if(respCode == 3000)
+	{
+		return "success: " + rowsUpdated + " row(s) marked Received";
+	}
+
+	// Fallback: status-only (avoids JSON_PARSE_ERROR from lookup/datetime fields)
+	dataMap2 = Map();
+	dataMap2.put("Vendor_Selection", statusOnlyRows);
+	updateResp2 = zoho.creator.updateRecord(
+		accountOwner,
+		appLinkName,
+		rfqReportLinkName,
+		rfqRecordId.toLong(),
+		dataMap2,
+		otherParams,
+		connectionName
+	);
+
+	respCode2 = 0;
+	try
+	{
+		respCode2 = ifnull(updateResp2.get("code"), 0).toLong();
+	}
+	catch (e)
+	{
+		respCode2 = 0;
+	}
+
+	if(respCode2 == 3000)
+	{
+		return "success: " + rowsUpdated + " row(s) marked Received";
+	}
+
+	return "error: update failed — " + updateResp2;
 }
