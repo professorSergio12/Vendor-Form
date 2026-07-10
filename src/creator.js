@@ -43,6 +43,11 @@ const ITEM_MASTER_REPORT = process.env.CREATOR_ITEM_MASTER_REPORT || "Items_Repo
 const ITEM_MASTER_NAME_FIELD = process.env.CREATOR_ITEM_MASTER_NAME_FIELD || "Name";
 const ITEM_MASTER_SKU_FIELD = process.env.CREATOR_ITEM_MASTER_SKU_FIELD || "SKU";
 const ITEM_MASTER_CODE_FIELD = process.env.CREATOR_ITEM_MASTER_CODE_FIELD || "Product_Code";
+const RFQ_FORM = process.env.CREATOR_RFQ_FORM || "RFQ";
+const CREATOR_WORKSPACE = process.env.CREATOR_WORKSPACE || "airatrex959";
+const MARK_RECEIVED_API =
+  process.env.CREATOR_MARK_RECEIVED_API || "Mark_Vendor_Quote_Received";
+const MARK_RECEIVED_PUBLIC_KEY = process.env.CREATOR_MARK_RECEIVED_PUBLIC_KEY || "";
 const RFQ_PRODUCTS_SUBFORM = process.env.CREATOR_RFQ_PRODUCTS_SUBFORM || "RFQ_Products";
 
 // RFQ > Vendor_Selection subform — updated when vendor submits a quote.
@@ -531,12 +536,16 @@ function buildVsRowForPatch(vsRow, responseStatus) {
 }
 
 async function patchRfqVendorSelection(rfqRecordId, updatedRows, token, options = {}) {
+  const target = options.useForm ? "form" : "report";
+  const linkName = options.useForm ? RFQ_FORM : RFQ_REPORT;
   const patchUrl =
-    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${RFQ_REPORT}/${rfqRecordId}`;
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/${target}/${linkName}/${rfqRecordId}`;
   const body = {
     data: { [RFQ_VENDOR_SELECTION]: updatedRows },
-    skip_workflow: ["form_workflow", "schedules"],
   };
+  if (options.skipWorkflow) {
+    body.skip_workflow = ["form_workflow", "schedules"];
+  }
   if (options.resultFields?.length) {
     body.result = { fields: options.resultFields, message: false, tasks: false };
   }
@@ -550,7 +559,106 @@ async function patchRfqVendorSelection(rfqRecordId, updatedRows, token, options 
     body: JSON.stringify(body),
   });
   const patchData = await patchRes.json().catch(() => ({}));
-  return { ok: patchRes.ok && patchData.code === 3000, patchData, body };
+  return { ok: patchRes.ok && patchData.code === 3000, patchData, body, patchUrl };
+}
+
+function joinItemIds(submittedItemIds) {
+  return Array.from(submittedItemIds).filter(Boolean).join("|");
+}
+
+function parseDelugeMarkResponse(raw) {
+  const text =
+    typeof raw === "string"
+      ? raw
+      : raw?.result || raw?.message || raw?.description || JSON.stringify(raw || "");
+  const rowsMatch = String(text).match(/(\d+)\s+row/i);
+  const rowsUpdated = rowsMatch ? Number(rowsMatch[1]) : 0;
+  const ok =
+    String(text).toLowerCase().includes("success") &&
+    rowsUpdated > 0 &&
+    !String(text).toLowerCase().includes("error");
+  return { ok, rowsUpdated, message: String(text).trim() };
+}
+
+/*
+ * Invoke Creator Custom API (Deluge + zoho.creator.updateRecord).
+ * REST PATCH on RFQ1 often returns 2930; Deluge connection works (same as email flow).
+ */
+async function invokeMarkVendorQuoteReceivedCustomApi({
+  rfqRecordId,
+  vendorRecordId,
+  itemIds,
+  contactEmail,
+  token,
+}) {
+  if (!MARK_RECEIVED_PUBLIC_KEY && !token) {
+    return { attempted: false, ok: false, reason: "missing custom API public key" };
+  }
+
+  const url = new URL(
+    `${API_HOST}/creator/custom/${CREATOR_WORKSPACE}/${MARK_RECEIVED_API}`
+  );
+  if (MARK_RECEIVED_PUBLIC_KEY) {
+    url.searchParams.set("publickey", MARK_RECEIVED_PUBLIC_KEY);
+  }
+
+  const payload = {
+    rfqRecordId: String(rfqRecordId),
+    vendorRecordId: String(vendorRecordId || ""),
+    itemIds: String(itemIds || ""),
+    contactEmail: String(contactEmail || ""),
+  };
+
+  const headers = { "Content-Type": "application/json" };
+  if (!MARK_RECEIVED_PUBLIC_KEY) {
+    headers.Authorization = `Zoho-oauthtoken ${token}`;
+  }
+
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+
+  if (Number(data?.code) === 3000) {
+    const parsed = parseDelugeMarkResponse(data.result ?? data.message ?? data);
+    return {
+      attempted: true,
+      ok: parsed.ok,
+      method: "custom_api",
+      rowsUpdated: parsed.rowsUpdated,
+      message: parsed.message,
+      detail: data,
+      payload,
+      url: url.toString(),
+    };
+  }
+
+  const parsed = parseDelugeMarkResponse(data?.result ?? data?.message ?? data);
+
+  if (!parsed.ok) {
+    console.error("Custom API markVendorQuoteReceived failed:", data);
+    return {
+      attempted: true,
+      ok: false,
+      method: "custom_api",
+      error: parsed.message || formatCreatorError(data),
+      detail: data,
+      payload,
+      url: url.toString(),
+    };
+  }
+
+  return {
+    attempted: true,
+    ok: true,
+    method: "custom_api",
+    rowsUpdated: parsed.rowsUpdated,
+    message: parsed.message,
+    detail: data,
+    url: url.toString(),
+  };
 }
 
 function normalizeVendorIds(vendorMaster) {
@@ -795,11 +903,59 @@ export async function markVendorQuoteReceived({
     };
   }
 
-  let patchResult = await patchRfqVendorSelection(rfqRecordId, updatedRows, token);
+  const itemIds = joinItemIds(submittedItemIds);
+  const primaryVendorId = Array.from(submittingVendorIds)[0] || String(vendorRecordId || "");
 
-  // Fallback: minimal patch (ID + Vendor_Response_Status only) if full row fails with 2930
-  if (!patchResult.ok && patchResult.patchData?.code === 2930) {
-    console.warn("Full Vendor_Selection patch failed (2930), retrying status-only…");
+  // 1) Custom API + Deluge (OAuth2 or Public Key — avoids REST error 2930)
+  const customResult = await invokeMarkVendorQuoteReceivedCustomApi({
+    rfqRecordId,
+    vendorRecordId: primaryVendorId,
+    itemIds,
+    contactEmail,
+    token,
+  });
+  if (customResult.ok) {
+    return {
+      attempted: true,
+      ok: true,
+      rowsUpdated: customResult.rowsUpdated || rowsUpdated,
+      method: "custom_api",
+      detail: customResult.detail,
+      message: customResult.message,
+    };
+  }
+  if (customResult.attempted) {
+    console.warn("Custom API status update failed, trying REST PATCH…", customResult);
+  }
+
+  // 2) REST PATCH fallbacks (OAuth report/form update)
+  const restAttempts = [
+    { label: "form", useForm: true, skipWorkflow: false },
+    { label: "report", useForm: false, skipWorkflow: false },
+    { label: "report+skip_workflow", useForm: false, skipWorkflow: true },
+  ];
+
+  let patchResult = null;
+  for (const attempt of restAttempts) {
+    patchResult = await patchRfqVendorSelection(rfqRecordId, updatedRows, token, {
+      useForm: attempt.useForm,
+      skipWorkflow: attempt.skipWorkflow,
+    });
+    if (patchResult.ok) {
+      return {
+        attempted: true,
+        ok: true,
+        rowsUpdated,
+        method: `rest_${attempt.label}`,
+        detail: patchResult.patchData,
+      };
+    }
+    if (patchResult.patchData?.code !== 2930) break;
+  }
+
+  // 3) Status-only REST fallback
+  if (patchResult && !patchResult.ok && patchResult.patchData?.code === 2930) {
+    console.warn("Full Vendor_Selection REST patch failed (2930), retrying status-only…");
     const statusOnlyRows = existingRows.map((vsRow) => {
       const productId = extractVsProductId(vsRow);
       const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
@@ -819,11 +975,13 @@ export async function markVendorQuoteReceived({
       };
     });
     patchResult = await patchRfqVendorSelection(rfqRecordId, statusOnlyRows, token, {
+      useForm: true,
+      skipWorkflow: false,
       resultFields: [VS_RESPONSE],
     });
   }
 
-  const { ok, patchData, body } = patchResult;
+  const { ok, patchData, body } = patchResult || { ok: false, patchData: {}, body: {} };
 
   if (!ok) {
     console.error("markVendorQuoteReceived patch failed:", patchData);
@@ -832,12 +990,14 @@ export async function markVendorQuoteReceived({
       attempted: true,
       ok: false,
       rowsUpdated,
-      error: formatCreatorError(patchData),
+      error:
+        formatCreatorError(patchData) +
+        " — Custom API also failed; check Render logs for custom_api response.",
       detail: patchData,
     };
   }
 
-  return { attempted: true, ok: true, rowsUpdated, detail: patchData };
+  return { attempted: true, ok: true, rowsUpdated, method: "rest", detail: patchData };
 }
 
 export async function createQuotationRecord(flatPayload, files = {}) {

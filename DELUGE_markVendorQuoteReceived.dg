@@ -1,15 +1,18 @@
-/*
- * Optional Deluge reference — NOT required if quotation-backend handles the update.
- *
- * The Render backend now PATCHes RFQ Vendor_Selection directly after a vendor
- * submits the React form. Keep this file only if you later want a Creator
- * Custom API instead of the Node proxy.
- *
- * Custom API params (all string):
- *   rfqRecordId, vendorRecordId, itemIds  (pipe-separated Item Master IDs)
- */
-string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string itemIds)
+// AiraTrex — markVendorQuoteReceived
+// Paste into Zoho Creator → Functions → markVendorQuoteReceived
+// Then: Microservices → Custom API → Mark_Vendor_Quote_Received
+//   Method: POST | Auth: Public Key | Map function args
+//
+// Custom API params (string):
+//   rfqRecordId, vendorRecordId, itemIds (pipe-separated), contactEmail
+
+string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string itemIds, string contactEmail)
 {
+	accountOwner = "airatrex959";
+	appLinkName = "airatrex";
+	rfqReportLinkName = "RFQ1";
+	connectionName = "zoho_creator_connection";
+
 	itemIdList = List();
 	if(itemIds != null && itemIds != "")
 	{
@@ -20,6 +23,20 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 			{
 				itemIdList.add(id);
 			}
+		}
+	}
+
+	vendorIdsInGroup = List();
+	if(vendorRecordId != null && vendorRecordId != "")
+	{
+		vendorIdsInGroup.add(vendorRecordId.toString());
+	}
+	if(contactEmail != null && contactEmail != "")
+	{
+		emailKey = contactEmail.trim().toLowerCase();
+		for each vendorRec in Vendor_Master[email == emailKey]
+		{
+			vendorIdsInGroup.add(vendorRec.ID.toString());
 		}
 	}
 
@@ -46,13 +63,31 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 		rowMap.put("Email_Sent_Date", ifnull(vsRow.Email_Sent_Date, ""));
 		rowMap.put("Vendor_Response_Status", ifnull(vsRow.Vendor_Response_Status, "Pending"));
 
-		productId = ifnull(vsRow.Products_Name1, "").toString();
-		vendorInRow = false;
-		for each v in vsRow.Vendor_Master
+		productId = "";
+		try
 		{
-			if(v.toString() == vendorRecordId.toString())
+			if(vsRow.Products_Name1 != null)
 			{
-				vendorInRow = true;
+				productId = ifnull(vsRow.Products_Name1.ID, "").toString();
+			}
+		}
+		catch (e)
+		{
+			productId = ifnull(vsRow.Products_Name1, "").toString();
+		}
+
+		vendorInRow = false;
+		if(vsRow.Vendor_Master != null)
+		{
+			for each v in vsRow.Vendor_Master
+			{
+				for each gid in vendorIdsInGroup
+				{
+					if(v.toString() == gid.toString())
+					{
+						vendorInRow = true;
+					}
+				}
 			}
 		}
 
@@ -79,13 +114,13 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 	otherParams = Map();
 
 	updateResp = zoho.creator.updateRecord(
-		"airatrex959",
-		"airatrex",
-		"RFQ1",
+		accountOwner,
+		appLinkName,
+		rfqReportLinkName,
 		rfqRecordId.toLong(),
 		dataMap,
 		otherParams,
-		"zoho_creator_connection"
+		connectionName
 	);
 
 	return "success: " + rowsUpdated + " row(s) marked Received — " + updateResp;

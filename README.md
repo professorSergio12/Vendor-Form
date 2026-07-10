@@ -55,8 +55,18 @@ The POST body is the flat object the React form sends (`rfqNumber`, `itemId`,
 `vendorId`, `product`, `quantity`, `price`, `currency`, `gst`, `freight`,
 `validity`, `remarks`, `uniqueId`). `src/creator.js` maps it to the Creator
 `data` + `Quotation_Items` subform payload, computes `Total_Amount`, and then
-**PATCHes the parent RFQ** so matching `Vendor_Selection` rows get
-`Vendor_Response_Status = Received`.
+updates matching `Vendor_Selection` rows to `Vendor_Response_Status = Received`.
+
+### Vendor_Response_Status (Custom API required)
+
+OAuth REST `PATCH` on RFQ1 often returns Zoho error **2930**. Use a **Custom API**
+mapped to Deluge `markVendorQuoteReceived` (same `zoho.creator.updateRecord` as
+RFQ email updates):
+
+1. Paste `DELUGE_markVendorQuoteReceived.dg` into Creator → Functions → Save
+2. **Microservices → Custom API → Create** `Mark_Vendor_Quote_Received`
+   - Method: POST | Auth: Public Key | Function: `markVendorQuoteReceived`
+3. Copy the public key → Render env `CREATOR_MARK_RECEIVED_PUBLIC_KEY`
 
 ## Deploy
 
