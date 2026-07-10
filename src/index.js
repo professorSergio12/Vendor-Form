@@ -73,6 +73,9 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
       const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
       const vendorStatusFailed =
         result.vendorStatus?.attempted && !result.vendorStatus?.ok;
+      if (vendorStatusFailed) {
+        console.warn("RFQ Vendor_Response_Status update failed:", result.vendorStatus);
+      }
       return res.json({
         ok: true,
         uniqueId: p.uniqueId,

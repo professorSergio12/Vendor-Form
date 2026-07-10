@@ -62,3 +62,18 @@ The POST body is the flat object the React form sends (`rfqNumber`, `itemId`,
 
 Any Node host (Render, Railway, Fly, a VM, or a Zoho Catalyst function). Set the
 same env vars there and point the React app's `CONFIG.BACKEND_URL` at it.
+
+### Keep Render awake (free tier)
+
+Render free services sleep after ~15 minutes without traffic. This repo includes a
+GitHub Actions cron (`.github/workflows/keep-alive.yml`) that pings `GET /health`
+every 14 minutes.
+
+1. Push this repo to GitHub.
+2. Enable **Actions** on the repo (Settings → Actions → General → Allow).
+3. The workflow runs automatically; first run may take up to 14 minutes.
+
+Health URL: `https://vendor-form-gpsx.onrender.com/health`
+
+Alternative (no GitHub): use [cron-job.org](https://cron-job.org) — same URL,
+schedule every 14 minutes, method GET.

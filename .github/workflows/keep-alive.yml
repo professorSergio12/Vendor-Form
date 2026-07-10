@@ -1,0 +1,21 @@
+# Pings the Render deployment every 14 minutes so the free tier does not sleep.
+# Requires this repo on GitHub with Actions enabled (Settings → Actions → Allow).
+
+name: Keep Render Alive
+
+on:
+  schedule:
+    # Every 14 minutes (Render free tier sleeps after ~15 min idle)
+    - cron: "*/14 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping quotation-backend /health
+        run: |
+          curl -fsS --max-time 90 \
+            "https://vendor-form-gpsx.onrender.com/health" \
+            | tee /tmp/health.json
+          grep -q '"ok":true' /tmp/health.json || grep -q '"ok": true' /tmp/health.json
