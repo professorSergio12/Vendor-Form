@@ -574,26 +574,6 @@ function normalizeVendorIds(vendorMaster) {
   return one ? [one] : [];
 }
 
-  if (vendorMaster == null) return [];
-  if (Array.isArray(vendorMaster)) {
-    return vendorMaster.map(lookupId).filter(Boolean);
-  }
-  if (typeof vendorMaster === "string") {
-    const text = vendorMaster.trim();
-    if (!text) return [];
-    if (text.includes(",")) {
-      return text
-        .split(",")
-        .map((part) => part.trim())
-        .filter(Boolean);
-    }
-    const one = lookupId(text);
-    return one ? [one] : isRecordId(text) ? [text] : [];
-  }
-  const one = lookupId(vendorMaster);
-  return one ? [one] : [];
-}
-
 function extractVsProductId(vsRow) {
   if (!vsRow || typeof vsRow !== "object") return "";
   const keys = [
