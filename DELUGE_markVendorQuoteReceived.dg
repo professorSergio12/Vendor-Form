@@ -81,9 +81,18 @@ string markVendorQuoteReceived(string rfqRecordId, string vendorRecordId, string
 		{
 			for each v in vsRow.Vendor_Master
 			{
+				vid = "";
+				try
+				{
+					vid = ifnull(v.ID, "").toString();
+				}
+				catch (e)
+				{
+					vid = ifnull(v, "").toString();
+				}
 				for each gid in vendorIdsInGroup
 				{
-					if(v.toString() == gid.toString())
+					if(vid == gid.toString())
 					{
 						vendorInRow = true;
 					}

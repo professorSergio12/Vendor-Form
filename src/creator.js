@@ -536,10 +536,22 @@ function buildVsRowForPatch(vsRow, responseStatus) {
 }
 
 async function patchRfqVendorSelection(rfqRecordId, updatedRows, token, options = {}) {
-  const target = options.useForm ? "form" : "report";
-  const linkName = options.useForm ? RFQ_FORM : RFQ_REPORT;
+  const account = owner();
+  const appName = app();
+  if (!account || !appName || !rfqRecordId) {
+    return {
+      ok: false,
+      patchData: {
+        code: 1000,
+        description: `Invalid Creator URL — check CREATOR_ACCOUNT_OWNER (${account}) and CREATOR_APP_LINK_NAME (${appName})`,
+      },
+      body: {},
+      patchUrl: "",
+    };
+  }
+
   const patchUrl =
-    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/${target}/${linkName}/${rfqRecordId}`;
+    `${API_HOST}/creator/v2.1/data/${account}/${appName}/report/${RFQ_REPORT}/${rfqRecordId}`;
   const body = {
     data: { [RFQ_VENDOR_SELECTION]: updatedRows },
   };
@@ -582,7 +594,7 @@ function parseDelugeMarkResponse(raw) {
 
 /*
  * Invoke Creator Custom API (Deluge + zoho.creator.updateRecord).
- * REST PATCH on RFQ1 often returns 2930; Deluge connection works (same as email flow).
+ * Use Public Key auth (same as Send_Notification_to_vendor) — OAuth returns 2945.
  */
 async function invokeMarkVendorQuoteReceivedCustomApi({
   rfqRecordId,
@@ -591,17 +603,6 @@ async function invokeMarkVendorQuoteReceivedCustomApi({
   contactEmail,
   token,
 }) {
-  if (!MARK_RECEIVED_PUBLIC_KEY && !token) {
-    return { attempted: false, ok: false, reason: "missing custom API public key" };
-  }
-
-  const url = new URL(
-    `${API_HOST}/creator/custom/${CREATOR_WORKSPACE}/${MARK_RECEIVED_API}`
-  );
-  if (MARK_RECEIVED_PUBLIC_KEY) {
-    url.searchParams.set("publickey", MARK_RECEIVED_PUBLIC_KEY);
-  }
-
   const payload = {
     rfqRecordId: String(rfqRecordId),
     vendorRecordId: String(vendorRecordId || ""),
@@ -609,56 +610,98 @@ async function invokeMarkVendorQuoteReceivedCustomApi({
     contactEmail: String(contactEmail || ""),
   };
 
-  const headers = { "Content-Type": "application/json" };
-  if (!MARK_RECEIVED_PUBLIC_KEY) {
-    headers.Authorization = `Zoho-oauthtoken ${token}`;
+  const baseUrl = `${API_HOST}/creator/custom/${CREATOR_WORKSPACE}/${MARK_RECEIVED_API}`;
+  const attempts = [];
+
+  if (MARK_RECEIVED_PUBLIC_KEY) {
+    const pkUrl = `${baseUrl}?publickey=${encodeURIComponent(MARK_RECEIVED_PUBLIC_KEY)}`;
+    attempts.push({
+      label: "public_key_json",
+      url: pkUrl,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    attempts.push({
+      label: "public_key_form",
+      url: pkUrl,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(payload).toString(),
+    });
   }
 
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
+  if (token) {
+    attempts.push({
+      label: "oauth_json",
+      url: baseUrl,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Zoho-oauthtoken ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  }
 
-  if (Number(data?.code) === 3000) {
-    const parsed = parseDelugeMarkResponse(data.result ?? data.message ?? data);
+  if (!attempts.length) {
     return {
-      attempted: true,
-      ok: parsed.ok,
-      method: "custom_api",
-      rowsUpdated: parsed.rowsUpdated,
-      message: parsed.message,
-      detail: data,
-      payload,
-      url: url.toString(),
+      attempted: false,
+      ok: false,
+      reason:
+        "Set CREATOR_MARK_RECEIVED_PUBLIC_KEY on Render (switch Custom API auth to Public Key in Creator).",
     };
   }
 
-  const parsed = parseDelugeMarkResponse(data?.result ?? data?.message ?? data);
+  let lastFailure = null;
 
-  if (!parsed.ok) {
-    console.error("Custom API markVendorQuoteReceived failed:", data);
-    return {
+  for (const attempt of attempts) {
+    const res = await fetch(attempt.url, {
+      method: "POST",
+      headers: attempt.headers,
+      body: attempt.body,
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (Number(data?.code) === 3000) {
+      const parsed = parseDelugeMarkResponse(data.result ?? data.message ?? data);
+      return {
+        attempted: true,
+        ok: parsed.ok,
+        method: `custom_api_${attempt.label}`,
+        rowsUpdated: parsed.rowsUpdated,
+        message: parsed.message,
+        detail: data,
+        payload,
+        url: attempt.url,
+      };
+    }
+
+    if (Number(data?.code) === 2945) {
+      lastFailure = {
+        attempted: true,
+        ok: false,
+        method: `custom_api_${attempt.label}`,
+        error:
+          "OAuth scope invalid (2945). In Creator → Mark_Vendor_Quote_Received → change Authentication to Public Key, copy key to CREATOR_MARK_RECEIVED_PUBLIC_KEY on Render.",
+        detail: data,
+        payload,
+        url: attempt.url,
+      };
+      continue;
+    }
+
+    const parsed = parseDelugeMarkResponse(data?.result ?? data?.message ?? data);
+    lastFailure = {
       attempted: true,
       ok: false,
-      method: "custom_api",
+      method: `custom_api_${attempt.label}`,
       error: parsed.message || formatCreatorError(data),
       detail: data,
       payload,
-      url: url.toString(),
+      url: attempt.url,
     };
   }
 
-  return {
-    attempted: true,
-    ok: true,
-    method: "custom_api",
-    rowsUpdated: parsed.rowsUpdated,
-    message: parsed.message,
-    detail: data,
-    url: url.toString(),
-  };
+  console.error("Custom API markVendorQuoteReceived failed:", lastFailure);
+  return lastFailure;
 }
 
 function normalizeVendorIds(vendorMaster) {
@@ -928,17 +971,15 @@ export async function markVendorQuoteReceived({
     console.warn("Custom API status update failed, trying REST PATCH…", customResult);
   }
 
-  // 2) REST PATCH fallbacks (OAuth report/form update)
+  // 2) REST PATCH fallback (report/RFQ1 only — form path caused error 1000)
   const restAttempts = [
-    { label: "form", useForm: true, skipWorkflow: false },
-    { label: "report", useForm: false, skipWorkflow: false },
-    { label: "report+skip_workflow", useForm: false, skipWorkflow: true },
+    { label: "report", skipWorkflow: false },
+    { label: "report+skip_workflow", skipWorkflow: true },
   ];
 
   let patchResult = null;
   for (const attempt of restAttempts) {
     patchResult = await patchRfqVendorSelection(rfqRecordId, updatedRows, token, {
-      useForm: attempt.useForm,
       skipWorkflow: attempt.skipWorkflow,
     });
     if (patchResult.ok) {
@@ -950,12 +991,16 @@ export async function markVendorQuoteReceived({
         detail: patchResult.patchData,
       };
     }
-    if (patchResult.patchData?.code !== 2930) break;
+    if (patchResult.patchData?.code !== 2930 && patchResult.patchData?.code !== 1000) break;
   }
 
   // 3) Status-only REST fallback
-  if (patchResult && !patchResult.ok && patchResult.patchData?.code === 2930) {
-    console.warn("Full Vendor_Selection REST patch failed (2930), retrying status-only…");
+  if (patchResult && !patchResult.ok) {
+    console.warn(
+      "REST Vendor_Selection patch failed, retrying status-only…",
+      patchResult.patchUrl,
+      patchResult.patchData
+    );
     const statusOnlyRows = existingRows.map((vsRow) => {
       const productId = extractVsProductId(vsRow);
       const vendorIds = normalizeVendorIds(vsRow[VS_VENDOR]);
@@ -975,16 +1020,20 @@ export async function markVendorQuoteReceived({
       };
     });
     patchResult = await patchRfqVendorSelection(rfqRecordId, statusOnlyRows, token, {
-      useForm: true,
       skipWorkflow: false,
       resultFields: [VS_RESPONSE],
     });
   }
 
-  const { ok, patchData, body } = patchResult || { ok: false, patchData: {}, body: {} };
+  const { ok, patchData, body, patchUrl } = patchResult || {
+    ok: false,
+    patchData: {},
+    body: {},
+    patchUrl: "",
+  };
 
   if (!ok) {
-    console.error("markVendorQuoteReceived patch failed:", patchData);
+    console.error("markVendorQuoteReceived patch failed:", patchData, "url:", patchUrl);
     console.error("PATCH payload:", JSON.stringify(body, null, 2));
     return {
       attempted: true,
