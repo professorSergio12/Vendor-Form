@@ -1,0 +1,538 @@
+// AiraTrex — sendRFQToVendors
+// Paste into Zoho Creator → Functions → sendRFQToVendors (edit existing)
+// Adds item descriptions from RFQ_Products / Item Master → React form URL param: descriptions
+
+string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, string rfqPayload)
+{
+	reactFormBaseUrl = "https://aire-trex.vercel.app";
+	accountOwner = "airatrex959";
+	appLinkName = "airatrex";
+	rfqReportLinkName = "RFQ1";
+	connectionName = "zoho_creator_connection";
+	normalizedItems = List();
+	emailsSent = 0;
+	rowsUpdated = 0;
+	// PATH 1: rfqPayload JSON string (widget always sends this)
+	if(rfqPayload != null && rfqPayload != "")
+	{
+		if(rfqNumber == null || rfqNumber == "")
+		{
+			rfqNumber = ifnull(rfqPayload.getJSON("rfqNumber"),"");
+		}
+		if(rfqRecordId == null || rfqRecordId == "")
+		{
+			rfqRecordId = ifnull(rfqPayload.getJSON("rfqRecordId"),"");
+		}
+		itemsJson = rfqPayload.getJSON("itemsList");
+		if(itemsJson != null && itemsJson != "")
+		{
+			itemsText = itemsJson + "";
+			itemsText = itemsText.trim();
+			if(itemsText.subString(0,1) != "[")
+			{
+				itemsText = "[" + itemsText + "]";
+			}
+			rawItems = itemsText.toJSONList();
+			for each  rawItem in rawItems
+			{
+				itemMap = Map();
+				directId = ifnull(rawItem.get("itemId"),"");
+				if(directId == null || directId == "")
+				{
+					directId = ifnull(rawItem.getJSON("itemId"),"");
+				}
+				if(directId != null && directId != "")
+				{
+					itemMap.put("itemId",directId);
+					itemMap.put("productName",ifnull(rawItem.get("productName"),ifnull(rawItem.getJSON("productName"),"")));
+					itemMap.put("quantity",ifnull(rawItem.get("quantity"),ifnull(rawItem.getJSON("quantity"),"")));
+					itemMap.put("unit",ifnull(rawItem.get("unit"),ifnull(rawItem.getJSON("unit"),"")));
+					itemMap.put("vendorId",ifnull(rawItem.get("vendorId"),ifnull(rawItem.getJSON("vendorId"),"")));
+					itemMap.put("vendorRecordId",ifnull(rawItem.get("vendorRecordId"),ifnull(rawItem.getJSON("vendorRecordId"),"")));
+					itemMap.put("vendorEmail",ifnull(rawItem.get("vendorEmail"),ifnull(rawItem.getJSON("vendorEmail"),"")));
+					itemMap.put("description",ifnull(rawItem.get("description"),ifnull(rawItem.getJSON("description"),"")));
+					normalizedItems.add(itemMap);
+				}
+			}
+		}
+	}
+	// PATH 2: itemsList fallback
+	if(normalizedItems.isEmpty() && itemsList != null && !itemsList.isEmpty())
+	{
+		for each  rawItem in itemsList
+		{
+			itemMap = Map();
+			directId = ifnull(rawItem.get("itemId"),"");
+			if(directId != null && directId != "")
+			{
+				itemMap.put("itemId",directId);
+				itemMap.put("productName",ifnull(rawItem.get("productName"),""));
+				itemMap.put("quantity",ifnull(rawItem.get("quantity"),""));
+				itemMap.put("unit",ifnull(rawItem.get("unit"),""));
+				itemMap.put("vendorId",ifnull(rawItem.get("vendorId"),""));
+				itemMap.put("vendorRecordId",ifnull(rawItem.get("vendorRecordId"),""));
+				itemMap.put("vendorEmail",ifnull(rawItem.get("vendorEmail"),""));
+				itemMap.put("description",ifnull(rawItem.get("description"),""));
+				normalizedItems.add(itemMap);
+			}
+			else
+			{
+				rawText = ifnull(rawItem + "","");
+				rawText = rawText.trim();
+				if(rawText != "" && rawText.subString(0,1) == "{")
+				{
+					parsedMap = rawText.toMap();
+					itemMap.put("itemId",ifnull(parsedMap.get("itemId"),""));
+					itemMap.put("productName",ifnull(parsedMap.get("productName"),""));
+					itemMap.put("quantity",ifnull(parsedMap.get("quantity"),""));
+					itemMap.put("unit",ifnull(parsedMap.get("unit"),""));
+					itemMap.put("vendorId",ifnull(parsedMap.get("vendorId"),""));
+					itemMap.put("vendorRecordId",ifnull(parsedMap.get("vendorRecordId"),""));
+					itemMap.put("vendorEmail",ifnull(parsedMap.get("vendorEmail"),""));
+					itemMap.put("description",ifnull(parsedMap.get("description"),""));
+					normalizedItems.add(itemMap);
+				}
+			}
+		}
+	}
+	if(normalizedItems.isEmpty())
+	{
+		return "error: no items parsed - add rfqPayload (string) param to Custom API";
+	}
+	// Description lookup from RFQ_Products (Product id → Description), then Items form
+	descByItemId = Map();
+	if(rfqRecordId != null && rfqRecordId != "")
+	{
+		try
+		{
+			rfqRecDesc = RFQ[ID == rfqRecordId.toLong()];
+			if(rfqRecDesc.count() > 0)
+			{
+				for each  prodRow in rfqRecDesc.RFQ_Products
+				{
+					productId = "";
+					try
+					{
+						if(prodRow.Product != null)
+						{
+							productId = ifnull(prodRow.Product.ID,"").toString();
+						}
+					}
+					catch (e)
+					{
+						productId = ifnull(prodRow.Product,"").toString();
+					}
+					descVal = ifnull(prodRow.Description,"");
+					descPlain = (descVal + "").trim();
+					if(productId != "" && descPlain != "")
+					{
+						descByItemId.put(productId,descPlain.trim());
+					}
+				}
+			}
+		}
+		catch (e)
+		{
+			descByItemId = Map();
+		}
+	}
+	// Normalize vendorRecordId
+	resolvedItems = List();
+	for each  item in normalizedItems
+	{
+		vendorRecordId = ifnull(item.get("vendorRecordId"),"");
+		vendorId = ifnull(item.get("vendorId"),"");
+		vendorEmail = ifnull(item.get("vendorEmail"),"");
+		resolvedVendorId = "";
+		if(vendorRecordId != null && vendorRecordId != "")
+		{
+			try
+			{
+				vendorRec = Vendor_Master[ID == vendorRecordId.toLong()];
+				if(vendorRec.count() > 0)
+				{
+					resolvedVendorId = vendorRec.ID.toString();
+					if(vendorId == null || vendorId == "")
+					{
+						vendorId = ifnull(vendorRec.Vendor_Code,"");
+					}
+					if(vendorEmail == null || vendorEmail == "")
+					{
+						vendorEmail = ifnull(vendorRec.email,"");
+					}
+				}
+			}
+			catch (e)
+			{
+				resolvedVendorId = "";
+			}
+		}
+		if(resolvedVendorId == null || resolvedVendorId == "")
+		{
+			if(vendorId != null && vendorId != "")
+			{
+				try
+				{
+					vendorRec = Vendor_Master[ID == vendorId.toLong()];
+					if(vendorRec.count() > 0)
+					{
+						resolvedVendorId = vendorRec.ID.toString();
+						if(vendorEmail == null || vendorEmail == "")
+						{
+							vendorEmail = ifnull(vendorRec.email,"");
+						}
+					}
+				}
+				catch (e)
+				{
+					vendorRec = Vendor_Master[Vendor_Code == vendorId];
+					if(vendorRec.count() > 0)
+					{
+						resolvedVendorId = vendorRec.ID.toString();
+						if(vendorEmail == null || vendorEmail == "")
+						{
+							vendorEmail = ifnull(vendorRec.email,"");
+						}
+					}
+				}
+			}
+		}
+		if(resolvedVendorId != null && resolvedVendorId != "")
+		{
+			newItem = Map();
+			newItem.put("itemId",ifnull(item.get("itemId"),""));
+			newItem.put("productName",ifnull(item.get("productName"),""));
+			newItem.put("quantity",ifnull(item.get("quantity"),""));
+			newItem.put("unit",ifnull(item.get("unit"),""));
+			newItem.put("vendorId",vendorId);
+			newItem.put("vendorRecordId",resolvedVendorId);
+			newItem.put("vendorEmail",vendorEmail);
+			itemDesc = ifnull(item.get("description"),"");
+			if(itemDesc == null || itemDesc == "")
+			{
+				itemIdKey = ifnull(item.get("itemId"),"");
+				if(itemIdKey != "" && descByItemId.containKey(itemIdKey))
+				{
+					itemDesc = descByItemId.get(itemIdKey);
+				}
+				if((itemDesc == null || itemDesc == "") && itemIdKey != "")
+				{
+					try
+					{
+						imRec = Items[ID == itemIdKey.toLong()];
+						if(imRec.count() > 0)
+						{
+							itemDesc = (imRec.Product_Description + "").trim();
+						}
+					}
+					catch (e)
+					{
+						itemDesc = "";
+					}
+				}
+			}
+			newItem.put("description",ifnull(itemDesc,"").trim());
+			resolvedItems.add(newItem);
+		}
+	}
+	if(resolvedItems.isEmpty())
+	{
+		return "error: no items with valid vendorRecordId after normalize";
+	}
+	// Group by vendorRecordId — one vendor = one email
+	vendorDataMap = Map();
+	for each  item in resolvedItems
+	{
+		vendorKey = ifnull(item.get("vendorRecordId"),"");
+		if(vendorKey == null || vendorKey == "")
+		{
+			continue;
+		}
+		if(!vendorDataMap.containKey(vendorKey))
+		{
+			vendorDataMap.put(vendorKey,List());
+		}
+		currentVendorItems = vendorDataMap.get(vendorKey);
+		currentVendorItems.add(item);
+		vendorDataMap.put(vendorKey,currentVendorItems);
+	}
+	if(vendorDataMap.isEmpty())
+	{
+		return "error: grouping failed - vendor keys missing after normalize";
+	}
+	// One email per vendor with all items in single link
+	emailedItemsByVendor = Map();
+	for each  vendorKey in vendorDataMap.keys()
+	{
+		vendorItems = vendorDataMap.get(vendorKey);
+		vendorEmail = "";
+		vendorId = "";
+		vendorRecordId = vendorKey;
+		vendorName = "";
+		firstItem = vendorItems.get(0);
+		vendorId = ifnull(firstItem.get("vendorId"),"");
+		try
+		{
+			vendorRec = Vendor_Master[ID == vendorRecordId.toLong()];
+			if(vendorRec.count() > 0)
+			{
+				vendorEmail = ifnull(vendorRec.email,"");
+				vendorName = ifnull(vendorRec.Vendor_Name,"");
+				if(vendorId == null || vendorId == "")
+				{
+					vendorId = ifnull(vendorRec.Vendor_Code,"");
+				}
+			}
+		}
+		catch (e)
+		{
+			vendorEmail = ifnull(firstItem.get("vendorEmail"),"");
+		}
+		if(vendorEmail == null || vendorEmail == "")
+		{
+			vendorEmail = ifnull(firstItem.get("vendorEmail"),"");
+		}
+		if(vendorEmail == null || vendorEmail == "")
+		{
+			continue;
+		}
+		itemIdsStr = "";
+		productNamesStr = "";
+		quantitiesStr = "";
+		unitsStr = "";
+		descriptionsStr = "";
+		tableRows = "";
+		emailedIds = List();
+		for each  item in vendorItems
+		{
+			itemId = ifnull(item.get("itemId"),"");
+			productName = ifnull(item.get("productName"),"");
+			quantity = ifnull(item.get("quantity"),"");
+			unit = ifnull(item.get("unit"),"");
+			description = "";
+			if(itemId != "" && descByItemId.containKey(itemId))
+			{
+				description = (descByItemId.get(itemId) + "").trim();
+			}
+			if(description == null || description == "")
+			{
+				if(itemId != null && itemId != "")
+				{
+					try
+					{
+						imLookup = Items[ID == itemId.toLong()];
+						if(imLookup.count() > 0)
+						{
+							description = (imLookup.Product_Description + "").trim();
+						}
+					}
+					catch (e)
+					{
+						description = "";
+					}
+				}
+			}
+			description = (description + "").trim().replaceAll("|"," ");
+			if(itemId != null && itemId != "")
+			{
+				emailedIds.add(itemId);
+			}
+			if(itemIdsStr != "")
+			{
+				itemIdsStr = itemIdsStr + "|";
+				productNamesStr = productNamesStr + "|";
+				quantitiesStr = quantitiesStr + "|";
+				unitsStr = unitsStr + "|";
+				descriptionsStr = descriptionsStr + "|";
+			}
+			itemIdsStr = itemIdsStr + itemId;
+			productNamesStr = productNamesStr + productName;
+			quantitiesStr = quantitiesStr + quantity;
+			unitsStr = unitsStr + unit;
+			descriptionsStr = descriptionsStr + encodeUrl(description);
+			qtyDisplay = quantity;
+			if(unit != null && unit != "")
+			{
+				qtyDisplay = quantity + " " + unit;
+			}
+			tableRows = tableRows + "<tr>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:600;'>" + productName + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:center;'>" + qtyDisplay + "</td>";
+			tableRows = tableRows + "</tr>";
+		}
+		vendorUid = rfqNumber + "_" + vendorRecordId;
+		if(vendorUid == rfqNumber + "_")
+		{
+			vendorUid = rfqNumber + "_" + vendorId;
+		}
+		urlParams = "?uid=" + vendorUid;
+		urlParams = urlParams + "&rfq_no=" + rfqNumber;
+		urlParams = urlParams + "&rfq_rid=" + rfqRecordId;
+		urlParams = urlParams + "&vendor_id=" + vendorId;
+		urlParams = urlParams + "&vendor_rid=" + vendorRecordId;
+		urlParams = urlParams + "&vendor_name=" + vendorName;
+		urlParams = urlParams + "&email=" + vendorEmail;
+		urlParams = urlParams + "&item_ids=" + itemIdsStr;
+		urlParams = urlParams + "&products=" + productNamesStr;
+		urlParams = urlParams + "&quantities=" + quantitiesStr;
+		urlParams = urlParams + "&units=" + unitsStr;
+		urlParams = urlParams + "&descriptions=" + descriptionsStr;
+		dynamicFormUrl = reactFormBaseUrl + urlParams;
+		itemCount = vendorItems.size();
+		subject = "Request for Quote: " + rfqNumber + " | " + itemCount + " Item(s)";
+		emailBody = "";
+		emailBody = emailBody + "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>";
+		emailBody = emailBody + "<body style='margin:0;padding:0;background-color:#f4f5f7;font-family:Arial,Helvetica,sans-serif;'>";
+		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='background-color:#f4f5f7;padding:24px 12px;'><tr><td align='center'>";
+		emailBody = emailBody + "<table width='600' cellpadding='0' cellspacing='0' style='max-width:600px;width:100%;background-color:#ffffff;border:1px solid #e9ecf1;border-radius:14px;overflow:hidden;'>";
+		emailBody = emailBody + "<tr><td style='background:linear-gradient(135deg,#f15a24 0%,#d94a17 100%);padding:24px 28px;'>";
+		emailBody = emailBody + "<div style='font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#ffe8dc;'>AiraTrex Sourcing Desk</div>";
+		emailBody = emailBody + "<div style='font-size:24px;font-weight:800;color:#ffffff;margin-top:6px;'>Request for Quotation</div>";
+		emailBody = emailBody + "<div style='font-size:13px;color:#fff4ee;margin-top:8px;'>RFQ Reference: <strong>" + rfqNumber + "</strong></div>";
+		emailBody = emailBody + "</td></tr>";
+		emailBody = emailBody + "<tr><td style='padding:28px;'>";
+		emailBody = emailBody + "<p style='margin:0 0 14px;font-size:15px;color:#1f2733;'>Dear Team,</p>";
+		emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please submit your quote for all item(s) below using the single form link.</p>";
+		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;border:1px solid #e9ecf1;border-radius:10px;overflow:hidden;'>";
+		emailBody = emailBody + "<tr style='background-color:#fafbfc;'>";
+		emailBody = emailBody + "<th align='left' style='padding:12px 16px;font-size:11px;text-transform:uppercase;color:#8a94a3;border-bottom:1px solid #e9ecf1;'>Product</th>";
+		emailBody = emailBody + "<th align='center' style='padding:12px 16px;font-size:11px;text-transform:uppercase;color:#8a94a3;border-bottom:1px solid #e9ecf1;'>Quantity</th>";
+		emailBody = emailBody + "</tr>";
+		emailBody = emailBody + tableRows;
+		emailBody = emailBody + "</table>";
+		emailBody = emailBody + "<p style='margin:24px 0 0;text-align:center;'>";
+		emailBody = emailBody + "<a href='" + dynamicFormUrl + "' style='display:inline-block;background-color:#f15a24;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;font-size:15px;font-weight:700;'>Submit Quotation for All Items</a>";
+		emailBody = emailBody + "</p>";
+		emailBody = emailBody + "<p style='margin:24px 0 0;font-size:14px;color:#1f2733;'>Regards,<br><strong>Sourcing Desk Team</strong></p>";
+		emailBody = emailBody + "</td></tr></table></td></tr></table></body></html>";
+		sendmail
+		[
+			from :zoho.adminuserid
+			to :vendorEmail
+			subject :subject
+			message :emailBody
+		]
+		emailsSent = emailsSent + 1;
+		emailedItemsByVendor.put(vendorRecordId,emailedIds);
+	}
+	// Single Vendor_Selection update after all emails (faster than per-vendor updateRecord)
+	if(rfqRecordId != null && rfqRecordId != "" && emailsSent > 0)
+	{
+		try
+		{
+			rfqRec = RFQ[ID == rfqRecordId.toLong()];
+			if(rfqRec.count() > 0)
+			{
+				sentDate = zoho.currenttime.toString("dd-MMM-yyyy HH:mm:ss");
+				updatedRows = List();
+				for each  vsRow in rfqRec.Vendor_Selection
+				{
+					productLookupId = "";
+					try
+					{
+						if(vsRow.Products_Name1 != null)
+						{
+							productLookupId = ifnull(vsRow.Products_Name1.ID,"").toString();
+						}
+					}
+					catch (e)
+					{
+						productLookupId = ifnull(vsRow.Products_Name1,"").toString();
+					}
+					vendorInAnyEmail = false;
+					itemEmailed = false;
+					for each  emailedVendorId in emailedItemsByVendor.keys()
+					{
+						emailedIdsForVendor = emailedItemsByVendor.get(emailedVendorId);
+						vendorInRow = false;
+						if(vsRow.Vendor_Master != null)
+						{
+							for each  v in vsRow.Vendor_Master
+							{
+								vid = "";
+								try
+								{
+									vid = ifnull(v.ID,"").toString();
+								}
+								catch (e)
+								{
+									vid = ifnull(v,"").toString();
+								}
+								if(vid == emailedVendorId.toString())
+								{
+									vendorInRow = true;
+								}
+							}
+						}
+						if(vendorInRow)
+						{
+							vendorInAnyEmail = true;
+							for each  eid in emailedIdsForVendor
+							{
+								if(productLookupId == eid.toString())
+								{
+									itemEmailed = true;
+								}
+							}
+						}
+					}
+					rowMap = Map();
+					if(vsRow.ID != null)
+					{
+						rowMap.put("ID",vsRow.ID);
+					}
+					if(productLookupId != "")
+					{
+						rowMap.put("Products_Name1",productLookupId);
+					}
+					vendorIdList = List();
+					if(vsRow.Vendor_Master != null)
+					{
+						for each  v in vsRow.Vendor_Master
+						{
+							vid = "";
+							try
+							{
+								vid = ifnull(v.ID,"").toString();
+							}
+							catch (e)
+							{
+								vid = ifnull(v,"").toString();
+							}
+							if(vid != "")
+							{
+								vendorIdList.add(vid);
+							}
+						}
+					}
+					if(!vendorIdList.isEmpty())
+					{
+						rowMap.put("Vendor_Master",vendorIdList);
+					}
+					rowMap.put("RFQ_Email_Sent",ifnull(vsRow.RFQ_Email_Sent,"Not Sent"));
+					rowMap.put("Email_Sent_Date",ifnull(vsRow.Email_Sent_Date,""));
+					rowMap.put("Vendor_Response_Status",ifnull(vsRow.Vendor_Response_Status,"Pending"));
+					if(vendorInAnyEmail && itemEmailed)
+					{
+						rowMap.put("RFQ_Email_Sent","Sent");
+						rowMap.put("Email_Sent_Date",sentDate);
+						if(ifnull(vsRow.Vendor_Response_Status,"") != "Received")
+						{
+							rowMap.put("Vendor_Response_Status","Pending");
+						}
+						rowsUpdated = rowsUpdated + 1;
+					}
+					updatedRows.add(rowMap);
+				}
+				dataMap = Map();
+				dataMap.put("Vendor_Selection",updatedRows);
+				otherParams = Map();
+				updateResp = zoho.creator.updateRecord(accountOwner,appLinkName,rfqReportLinkName,rfqRecordId.toLong(),dataMap,otherParams,connectionName);
+			}
+		}
+		catch (e)
+		{
+		}
+	}
+	return "success: " + emailsSent + " email(s) sent to " + vendorDataMap.size() + " vendor(s), " + rowsUpdated + " subform row(s) updated";
+}

@@ -695,6 +695,20 @@ async function invokeMarkVendorQuoteReceivedCustomApi({
       continue;
     }
 
+    if (Number(data?.code) === 9400) {
+      lastFailure = {
+        attempted: true,
+        ok: false,
+        method: `custom_api_${attempt.label}`,
+        error:
+          "Invalid HTTP method (9400). Custom API Mark_Vendor_Quote_Received must be Method: POST (not GET). Do not open the URL in a browser — backend already uses POST.",
+        detail: data,
+        payload,
+        url: attempt.url,
+      };
+      continue;
+    }
+
     const parsed = parseDelugeMarkResponse(data?.result ?? data?.message ?? data);
     lastFailure = {
       attempted: true,
