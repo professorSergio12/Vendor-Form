@@ -6,6 +6,7 @@ import {
   createQuotationRecord,
   formatCreatorError,
   parseFilesByRow,
+  streamQuotationSubformFile,
 } from "./creator.js";
 
 const app = express();
@@ -31,6 +32,18 @@ app.use(
 );
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "quotation-backend" }));
+
+app.get("/api/quotation-files/:recordId/:subRowId/:field", async (req, res) => {
+  try {
+    const { recordId, subRowId, field } = req.params;
+    await streamQuotationSubformFile(recordId, subRowId, decodeURIComponent(field), res);
+  } catch (err) {
+    console.error("quotation-files download error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, message: err.message || "Download failed." });
+    }
+  }
+});
 
 app.post("/api/quotations", upload.any(), async (req, res) => {
   const p = req.body || {};
@@ -71,10 +84,15 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
     if (result.ok) {
       const hadFiles = Object.keys(filesByRow).length > 0;
       const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
+      const fileUrlPatch = result.uploads?.fileUrlPatch;
+      const fileUrlFailed = fileUrlPatch?.attempted && !fileUrlPatch?.ok;
       const vendorStatusFailed =
         result.vendorStatus?.attempted && !result.vendorStatus?.ok;
       if (vendorStatusFailed) {
         console.warn("RFQ Vendor_Response_Status update failed:", result.vendorStatus);
+      }
+      if (fileUrlFailed) {
+        console.warn("File_Upload_URL patch failed:", fileUrlPatch);
       }
       return res.json({
         ok: true,
@@ -87,6 +105,10 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
         uploadWarning: uploadFailed
           ? result.uploads.error ||
             "Quotation saved but one or more files could not be uploaded."
+          : null,
+        fileUrlWarning: fileUrlFailed
+          ? fileUrlPatch.error ||
+            "Quotation saved and files uploaded, but File_Upload_URL was not updated in Creator."
           : null,
         vendorStatusWarning: vendorStatusFailed
           ? result.vendorStatus.error ||
