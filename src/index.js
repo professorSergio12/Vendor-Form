@@ -5,8 +5,7 @@ import multer from "multer";
 import {
   createQuotationRecord,
   formatCreatorError,
-  parseFilesByRow,
-  streamQuotationSubformFile,
+  parseQuotationFiles,
 } from "./creator.js";
 
 const app = express();
@@ -33,21 +32,9 @@ app.use(
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "quotation-backend" }));
 
-app.get("/api/quotation-files/:recordId/:subRowId/:field", async (req, res) => {
-  try {
-    const { recordId, subRowId, field } = req.params;
-    await streamQuotationSubformFile(recordId, subRowId, decodeURIComponent(field), res);
-  } catch (err) {
-    console.error("quotation-files download error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ ok: false, message: err.message || "Download failed." });
-    }
-  }
-});
-
 app.post("/api/quotations", upload.any(), async (req, res) => {
   const p = req.body || {};
-  const filesByRow = parseFilesByRow(req.files || []);
+  const files = parseQuotationFiles(req.files || []);
 
   if (!p.rfqNumber) {
     return res.status(400).json({ ok: false, message: "Missing rfqNumber." });
@@ -80,20 +67,14 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
   }
 
   try {
-    const result = await createQuotationRecord(p, filesByRow);
+    const result = await createQuotationRecord(p, files);
     if (result.ok) {
-      const hadFiles = Object.keys(filesByRow).length > 0;
-      const uploadFailed = hadFiles && result.uploads?.attempted && !result.uploads?.allOk;
-      const fileUrlPatch = result.uploads?.fileUrlPatch;
-      const fileUrlFailed = fileUrlPatch?.attempted && !fileUrlPatch?.ok;
+      const hadFiles =
+        (files.attachment?.length || 0) > 0 || (files.datasheet?.length || 0) > 0;
+      const uploadFailed =
+        hadFiles && result.uploads?.attempted && result.uploads?.filesUploadedOk === false;
       const vendorStatusFailed =
         result.vendorStatus?.attempted && !result.vendorStatus?.ok;
-      if (vendorStatusFailed) {
-        console.warn("RFQ Vendor_Response_Status update failed:", result.vendorStatus);
-      }
-      if (fileUrlFailed) {
-        console.warn("Attachment_Filepath/Datasheet_Filepath patch failed:", fileUrlPatch);
-      }
       return res.json({
         ok: true,
         uniqueId: p.uniqueId,
@@ -106,17 +87,12 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
           ? result.uploads.error ||
             "Quotation saved but one or more files could not be uploaded."
           : null,
-        fileUrlWarning: fileUrlFailed
-          ? fileUrlPatch.error ||
-            "Quotation saved and files uploaded, but Attachment_Filepath/Datasheet_Filepath was not updated in Creator."
-          : null,
         vendorStatusWarning: vendorStatusFailed
           ? result.vendorStatus.error ||
             "Quotation saved but RFQ Vendor_Response_Status was not updated."
           : null,
       });
     }
-    console.error("Creator rejected submission:", JSON.stringify(result.data, null, 2));
     return res.status(502).json({
       ok: false,
       message: formatCreatorError(result.data),
@@ -124,13 +100,9 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
       resolved: result.resolved,
     });
   } catch (err) {
-    console.error("Submission error:", err);
     return res.status(500).json({ ok: false, message: err.message || "Server error." });
   }
 });
 
 const port = Number(process.env.PORT) || 8787;
-app.listen(port, () => {
-  console.log(`quotation-backend listening on http://localhost:${port}`);
-  if (allowed.length) console.log("CORS allowed origins:", allowed.join(", "));
-});
+app.listen(port);

@@ -1,0 +1,74 @@
+// AiraTrex — updateQuotationFilepath
+// Paste into Zoho Creator → Functions → updateQuotationFilepath
+// Custom API: Update_Quotation_Filepath | POST | Public Key
+//
+// Params:
+//   parentRecordId  — Vendor Quotations record ID
+//   subRowId        — Quotation_Items row ID
+//   attachmentUrl   — URL for Attachment_Filepath (optional)
+//   datasheetUrl    — URL for Datasheet_Filepath (optional)
+
+string updateQuotationFilepath(string parentRecordId, string subRowId, string attachmentUrl, string datasheetUrl)
+{
+	accountOwner = "airatrex959";
+	appLinkName = "airatrex";
+	reportLinkName = "Vendor_Quotations_Report";
+	connectionName = "zoho_creator_connection";
+
+	if(parentRecordId == null || parentRecordId == "" || subRowId == null || subRowId == "")
+	{
+		return "error: parentRecordId and subRowId are required";
+	}
+
+	hasAttachment = attachmentUrl != null && attachmentUrl.trim() != "";
+	hasDatasheet = datasheetUrl != null && datasheetUrl.trim() != "";
+	if(!hasAttachment && !hasDatasheet)
+	{
+		return "error: attachmentUrl or datasheetUrl is required";
+	}
+
+	rowMap = Map();
+	rowMap.put("ID", subRowId);
+	if(hasAttachment)
+	{
+		rowMap.put("Attachment_Filepath", attachmentUrl.trim());
+	}
+	if(hasDatasheet)
+	{
+		rowMap.put("Datasheet_Filepath", datasheetUrl.trim());
+	}
+
+	subformRows = List();
+	subformRows.add(rowMap);
+
+	dataMap = Map();
+	dataMap.put("Quotation_Items", subformRows);
+	otherParams = Map();
+
+	updateResp = zoho.creator.updateRecord(
+		accountOwner,
+		appLinkName,
+		reportLinkName,
+		parentRecordId.toLong(),
+		dataMap,
+		otherParams,
+		connectionName
+	);
+
+	respCode = 0;
+	try
+	{
+		respCode = ifnull(updateResp.get("code"), 0).toLong();
+	}
+	catch (e)
+	{
+		respCode = 0;
+	}
+
+	if(respCode == 3000)
+	{
+		return "success: filepath updated for row " + subRowId;
+	}
+
+	return "error: update failed — " + updateResp;
+}
