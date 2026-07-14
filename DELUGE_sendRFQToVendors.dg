@@ -99,6 +99,52 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: no items parsed - add rfqPayload (string) param to Custom API";
 	}
+	// Quantity/unit fallback from RFQ_Products when widget payload is empty
+	qtyByProductId = Map();
+	unitByProductId = Map();
+	qtyByRowId = Map();
+	unitByRowId = Map();
+	if(rfqRecordId != null && rfqRecordId != "")
+	{
+		try
+		{
+			rfqRecQty = RFQ[ID == rfqRecordId.toLong()];
+			if(rfqRecQty.count() > 0)
+			{
+				for each  prodRow in rfqRecQty.RFQ_Products
+				{
+					rowId = ifnull(prodRow.ID,"").toString();
+					productId = "";
+					try
+					{
+						if(prodRow.Product != null)
+						{
+							productId = ifnull(prodRow.Product.ID,"").toString();
+						}
+					}
+					catch (e)
+					{
+						productId = ifnull(prodRow.Product,"").toString();
+					}
+					qtyVal = (ifnull(prodRow.Quantity,"") + "").trim();
+					unitVal = (ifnull(prodRow.Unit,"") + "").trim();
+					if(rowId != null && rowId != "")
+					{
+						qtyByRowId.put(rowId,qtyVal);
+						unitByRowId.put(rowId,unitVal);
+					}
+					if(productId != null && productId != "")
+					{
+						qtyByProductId.put(productId,qtyVal);
+						unitByProductId.put(productId,unitVal);
+					}
+				}
+			}
+		}
+		catch (e)
+		{
+		}
+	}
 	// Description comes from widget rfqPayload (JSON) - do not re-fetch from Items (Deluge corrupts spacing)
 	// Normalize vendorRecordId
 	resolvedItems = List();
@@ -166,8 +212,27 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			newItem = Map();
 			newItem.put("itemId",ifnull(item.get("itemId"),""));
 			newItem.put("productName",ifnull(item.get("productName"),""));
-			newItem.put("quantity",ifnull(item.get("quantity"),""));
-			newItem.put("unit",ifnull(item.get("unit"),""));
+			itemQty = ifnull(item.get("quantity"),"");
+			itemUnit = ifnull(item.get("unit"),"");
+			itemIdKey = ifnull(item.get("itemId"),"");
+			if((itemQty == null || itemQty == "") && itemIdKey != null && itemIdKey != "" && qtyByRowId.containKey(itemIdKey))
+			{
+				itemQty = qtyByRowId.get(itemIdKey);
+			}
+			if((itemQty == null || itemQty == "") && itemIdKey != null && itemIdKey != "" && qtyByProductId.containKey(itemIdKey))
+			{
+				itemQty = qtyByProductId.get(itemIdKey);
+			}
+			if((itemUnit == null || itemUnit == "") && itemIdKey != null && itemIdKey != "" && unitByRowId.containKey(itemIdKey))
+			{
+				itemUnit = unitByRowId.get(itemIdKey);
+			}
+			if((itemUnit == null || itemUnit == "") && itemIdKey != null && itemIdKey != "" && unitByProductId.containKey(itemIdKey))
+			{
+				itemUnit = unitByProductId.get(itemIdKey);
+			}
+			newItem.put("quantity",(itemQty + "").trim());
+			newItem.put("unit",(itemUnit + "").trim());
 			newItem.put("vendorId",vendorId);
 			newItem.put("vendorRecordId",resolvedVendorId);
 			newItem.put("vendorEmail",vendorEmail);
@@ -268,8 +333,36 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		{
 			itemId = ifnull(item.get("itemId"),"");
 			productName = ifnull(item.get("productName"),"");
-			quantity = ifnull(item.get("quantity"),"");
-			unit = ifnull(item.get("unit"),"");
+			quantity = (ifnull(item.get("quantity"),"") + "").trim();
+			unit = (ifnull(item.get("unit"),"") + "").trim();
+			if(quantity == null || quantity == "")
+			{
+				if(itemId != null && itemId != "" && qtyByProductId.containKey(itemId))
+				{
+					quantity = (qtyByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(quantity == null || quantity == "")
+			{
+				if(itemId != null && itemId != "" && qtyByRowId.containKey(itemId))
+				{
+					quantity = (qtyByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(unit == null || unit == "")
+			{
+				if(itemId != null && itemId != "" && unitByProductId.containKey(itemId))
+				{
+					unit = (unitByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(unit == null || unit == "")
+			{
+				if(itemId != null && itemId != "" && unitByRowId.containKey(itemId))
+				{
+					unit = (unitByRowId.get(itemId) + "").trim();
+				}
+			}
 			description = ifnull(item.get("description"),"").trim();
 			description = description.replaceAll("|"," ");
 			if(description == null || description == "")

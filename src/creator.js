@@ -6,7 +6,10 @@
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
- *         Item_Master, Attachment, Datasheet, File_Upload_URL, Status (per line → Pending Review)
+ *         Item_Master, Attachment, Datasheet, File_Upload_URL (comma-separated refs/URLs),
+ *         Status (per line → Pending Review)
+ *
+ * RFQ form RFQ_Products subform (qty source for vendor email): Product, Quantity (DECIMAL), Unit
  *
  * Parent Quotation_Version: v0 first submit per RFQ+vendor, then v1, v2, …
  */
@@ -413,29 +416,42 @@ function fileFieldHasUpload(value) {
   return text.length > 0 && !/^select file$/i.test(text);
 }
 
-function extractFileFieldUrl(value, { recordId, subRowId, fieldName }) {
+function extractFileFieldReference(value) {
   if (!fileFieldHasUpload(value)) return "";
 
   if (Array.isArray(value)) {
     return value
-      .map((entry) => extractFileFieldUrl(entry, { recordId, subRowId, fieldName }))
+      .map((entry) => extractFileFieldReference(entry))
       .filter(Boolean)
       .join(",");
   }
 
   if (typeof value === "object") {
+    const filepath = String(value.filepath ?? "").trim();
+    if (filepath) return filepath;
+    const filename = String(value.filename ?? "").trim();
+    if (filename) return filename;
     const direct = value.url || value.file_url || value.download_url || value.value;
     if (direct && /^https?:\/\//i.test(String(direct))) return String(direct).trim();
-    if (value.filepath || value.filename || value.display_value || value.zc_display_value) {
-      return buildSubformDownloadUrl(recordId, subRowId, fieldName);
-    }
+    const label = value.display_value || value.zc_display_value;
+    if (label && !/^select file$/i.test(String(label))) return String(label).trim();
     return "";
   }
 
   const text = String(value).trim();
+  if (!text || /^select file$/i.test(text)) return "";
   if (/^https?:\/\//i.test(text)) return text;
-  if (text) return buildSubformDownloadUrl(recordId, subRowId, fieldName);
-  return "";
+  return text;
+}
+
+function extractFileFieldUrl(value, { recordId, subRowId, fieldName }) {
+  const reference = extractFileFieldReference(value);
+  if (!reference) return "";
+  if (/^https?:\/\//i.test(reference)) return reference;
+  if (recordId && subRowId && fieldName) {
+    return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+  }
+  return reference;
 }
 
 function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
@@ -450,6 +466,9 @@ function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
     "Modified_User",
     "Record_Status",
     "zc_display_value",
+    "Total_Amount",
+    ATTACHMENT_FIELD,
+    DATASHEET_FIELD,
   ]);
 
   return (Array.isArray(subRows) ? subRows : []).map((apiRow) => {
@@ -459,9 +478,15 @@ function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
     Object.keys(apiRow || {}).forEach((key) => {
       if (skipKeys.has(key)) return;
       if (key === "ID" || key === "id") return;
-      if (key === ATTACHMENT_FIELD || key === DATASHEET_FIELD) return;
       const val = apiRow[key];
       if (val == null || val === "") return;
+      if (typeof val === "object" && !Array.isArray(val)) {
+        const scalar = val.display_value ?? val.zc_display_value ?? val.value;
+        if (scalar != null && scalar !== "") {
+          row[key] = scalar;
+        }
+        return;
+      }
       row[key] = val;
     });
 
@@ -469,12 +494,105 @@ function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
     if (itemMasterId) row[itemKey] = itemMasterId;
 
     const urls = rowUrlUpdates[rowId];
-    if (urls && urls.length) {
+    if (urls?.length) {
+      // Single File_Upload_URL field — comma-separated when Attachment + Datasheet both exist.
       row[urlField] = urls.filter(Boolean).join(",");
     }
 
     return row;
   });
+}
+
+function scalarPatchValue(val) {
+  if (val == null || val === "") return "";
+  if (typeof val === "object" && !Array.isArray(val)) {
+    const nested = val.display_value ?? val.zc_display_value ?? val.value ?? val.ID ?? val.id;
+    if (nested != null && nested !== "") return nested;
+    return "";
+  }
+  return val;
+}
+
+function normalizeCurrencyPatchValue(val) {
+  const text = String(scalarPatchValue(val) || "").trim();
+  if (!text) return "";
+  const upper = text.toUpperCase();
+  for (const [code, label] of Object.entries(CREATOR_CURRENCY_CHOICES)) {
+    if (text === label || upper === code || text.startsWith(code)) return label;
+  }
+  return text;
+}
+
+const QUOTATION_PATCH_SCALAR_FIELDS = [
+  "Quantity",
+  "Description",
+  "Remarks",
+  "Unit_Price",
+  "GST",
+  "Delivery_Date",
+];
+
+function buildMinimalSubformPatchRow(apiRow, rowUrlUpdates) {
+  const rowId = String(apiRow?.ID || apiRow?.id || "");
+  if (!rowId) return null;
+
+  const row = { ID: rowId };
+  const itemMasterId = lookupId(apiRow?.Item_Master);
+  if (itemMasterId) row.Item_Master = itemMasterId;
+
+  for (const field of QUOTATION_PATCH_SCALAR_FIELDS) {
+    const raw = apiRow?.[field];
+    if (raw == null || raw === "") continue;
+    const val = scalarPatchValue(raw);
+    if (val !== "" && val != null) row[field] = val;
+  }
+
+  const availField = availableQuantityField();
+  const availRaw = apiRow?.[availField];
+  if (availRaw != null && availRaw !== "") {
+    const availVal = scalarPatchValue(availRaw);
+    if (availVal !== "" && availVal != null) {
+      row[availField] = Number(availVal);
+    }
+  }
+
+  const currency = normalizeCurrencyPatchValue(apiRow?.Currency);
+  if (currency) row.Currency = currency;
+
+  const status = scalarPatchValue(apiRow?.[itemStatusField()]);
+  if (status) row[itemStatusField()] = status;
+
+  const urls = rowUrlUpdates[rowId];
+  if (urls?.length) {
+    // One File_Upload_URL field — comma-separated for attachment + datasheet.
+    row[fileUploadUrlField()] = urls.filter(Boolean).join(",");
+  }
+
+  return row;
+}
+
+async function patchQuotationSubformRows(recordId, rows, token, options = {}) {
+  const target = options.useForm ? "form" : "report";
+  const linkName = options.useForm ? form() : QUOTATIONS_REPORT;
+  const patchUrl =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/${target}/${linkName}/${recordId}`;
+
+  const body = { data: { [subform()]: rows } };
+  if (!options.runWorkflow) {
+    body.skip_workflow = ["form_workflow", "schedules"];
+  }
+
+  const patchRes = await fetch(patchUrl, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const patchData = await patchRes.json().catch(() => ({}));
+  const ok = patchRes.ok && patchData.code === 3000;
+  return { ok, patchData, patchUrl, rows, strategy: options.strategy || "unknown" };
 }
 
 async function collectUploadedFileUrls({
@@ -491,14 +609,17 @@ async function collectUploadedFileUrls({
     if (!result?.ok || result.row == null) return;
     const subRowId = subRowIds[result.row];
     if (!subRowId) return;
-    let fileUrl = result.fileUrl;
-    if (!fileUrl && result.field) {
-      fileUrl = buildSubformDownloadUrl(recordId, subRowId, result.field);
+    let fileRef = result.fileRef || result.fileUrl;
+    if (!fileRef && result.data) {
+      fileRef = extractUploadFileReference(result.data);
     }
-    if (!fileUrl) return;
+    if (!fileRef && result.field) {
+      fileRef = buildSubformDownloadUrl(recordId, subRowId, result.field);
+    }
+    if (!fileRef) return;
     if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
-    if (!rowUrlUpdates[subRowId].includes(fileUrl)) {
-      rowUrlUpdates[subRowId].push(fileUrl);
+    if (!rowUrlUpdates[subRowId].includes(fileRef)) {
+      rowUrlUpdates[subRowId].push(fileRef);
     }
   });
 
@@ -517,20 +638,12 @@ async function collectUploadedFileUrls({
 
       const urls = [];
       if (rowFiles.attachment) {
-        const attachmentUrl = extractFileFieldUrl(apiRow[ATTACHMENT_FIELD], {
-          recordId,
-          subRowId,
-          fieldName: ATTACHMENT_FIELD,
-        });
-        if (attachmentUrl) urls.push(attachmentUrl);
+        const attachmentRef = extractFileFieldReference(apiRow[ATTACHMENT_FIELD]);
+        if (attachmentRef) urls.push(attachmentRef);
       }
       if (rowFiles.datasheet) {
-        const datasheetUrl = extractFileFieldUrl(apiRow[DATASHEET_FIELD], {
-          recordId,
-          subRowId,
-          fieldName: DATASHEET_FIELD,
-        });
-        if (datasheetUrl) urls.push(datasheetUrl);
+        const datasheetRef = extractFileFieldReference(apiRow[DATASHEET_FIELD]);
+        if (datasheetRef) urls.push(datasheetRef);
       }
 
       if (urls.length) {
@@ -557,48 +670,58 @@ function buildUploadAttempts(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
   const dotted = `${subform()}.${fieldName}`;
-  // Mirror of "Download File from Subform" — replace /download with /upload.
-  // Do NOT send parent_id; that param is JS-SDK-only and rejected by REST (code 1060).
+  // v2.1 subform upload — same shape as parent upload, with subform row id segment.
+  // skip_workflow as query param (v2.1 docs) avoids form workflow errors during upload.
+  const skipWorkflow = encodeURIComponent(JSON.stringify(["form_workflow", "schedules"]));
   return [
     {
       label: "subform upload path",
-      url: `${base}/${recordId}/${dotted}/${subRowId}/upload`,
+      url: `${base}/${recordId}/${dotted}/${subRowId}/upload?skip_workflow=${skipWorkflow}`,
       extraFields: {},
     },
   ];
 }
 
 /*
- * Zoho upload may return file_url / url, or filepath — build a download URL as fallback.
+ * v2.1 upload response: { code: 3000, filename, filepath, message }
+ * Store filepath in File_Upload_URL — not the OAuth download API URL.
  */
-function extractUploadedFileUrl(data, { recordId, subRowId, fieldName }) {
+function extractUploadFileReference(data) {
   if (!data || typeof data !== "object") return "";
 
   const nested = data.data && typeof data.data === "object" ? data.data : null;
+  const filepath = String(data.filepath ?? nested?.filepath ?? "").trim();
+  if (filepath) return filepath;
+  const filename = String(data.filename ?? nested?.filename ?? "").trim();
+  if (filename) return filename;
+
   const candidates = [
     data.file_url,
     data.url,
     data.download_url,
-    data.filepath,
-    data.filename,
     nested?.file_url,
     nested?.url,
     nested?.download_url,
-    nested?.filepath,
-    nested?.filename,
   ];
-
   for (const candidate of candidates) {
     const text = String(candidate ?? "").trim();
-    if (!text) continue;
-    if (/^https?:\/\//i.test(text)) return text;
-  }
-
-  if ((data.filepath || data.filename) && recordId && subRowId && fieldName) {
-    return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+    if (text && /^https?:\/\//i.test(text)) return text;
   }
 
   return "";
+}
+
+/*
+ * Builds an API download URL when only filepath is known (for logging / API consumers).
+ */
+function extractUploadedFileUrl(data, { recordId, subRowId, fieldName }) {
+  const reference = extractUploadFileReference(data);
+  if (!reference) return "";
+  if (/^https?:\/\//i.test(reference)) return reference;
+  if (recordId && subRowId && fieldName) {
+    return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+  }
+  return reference;
 }
 
 function describeUploadError(status, data, raw) {
@@ -651,16 +774,14 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
       const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
 
       if (ok) {
-        let fileUrl = extractUploadedFileUrl(data, { recordId, subRowId, fieldName });
-        if (!fileUrl) {
-          fileUrl = buildSubformDownloadUrl(recordId, subRowId, fieldName);
-        }
+        const fileRef = extractUploadFileReference(data);
         return {
           ok: true,
           field: fieldName,
           status: res.status,
           data,
-          fileUrl,
+          fileRef: fileRef || buildSubformDownloadUrl(recordId, subRowId, fieldName),
+          fileUrl: fileRef || buildSubformDownloadUrl(recordId, subRowId, fieldName),
           url: attempt.url,
         };
       }
@@ -716,44 +837,100 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token) {
     };
   }
 
-  const rows = buildSubformRowsForFileUrlUpdate(record, rowUrlUpdates);
-  if (!rows.length) {
-    return {
-      attempted: true,
-      ok: false,
-      error: "No Quotation_Items rows found for File_Upload_URL patch.",
-      rows: [],
-    };
+  const subRows = record?.[subform()] || record?.Quotation_Items || [];
+  const minimalUpdated = subRows
+    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowUrlUpdates))
+    .filter((row) => row && row[fileUploadUrlField()]);
+  const minimalAll = subRows
+    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowUrlUpdates))
+    .filter(Boolean);
+  const fullRows = buildSubformRowsForFileUrlUpdate(record, rowUrlUpdates);
+
+  const strategies = [];
+  if (minimalUpdated.length) {
+    strategies.push({
+      strategy: "minimal-updated-report",
+      rows: minimalUpdated,
+      useForm: false,
+      runWorkflow: false,
+    });
+    strategies.push({
+      strategy: "minimal-updated-form",
+      rows: minimalUpdated,
+      useForm: true,
+      runWorkflow: false,
+    });
+    strategies.push({
+      strategy: "minimal-updated-workflow",
+      rows: minimalUpdated,
+      useForm: false,
+      runWorkflow: true,
+    });
+    minimalUpdated.forEach((row) => {
+      strategies.push({
+        strategy: `single-row-${row.ID}`,
+        rows: [row],
+        useForm: false,
+        runWorkflow: false,
+      });
+      strategies.push({
+        strategy: `url-only-${row.ID}`,
+        rows: [{ ID: row.ID, [fileUploadUrlField()]: row[fileUploadUrlField()] }],
+        useForm: false,
+        runWorkflow: false,
+      });
+    });
+  }
+  if (minimalAll.length) {
+    strategies.push({
+      strategy: "minimal-all-report",
+      rows: minimalAll,
+      useForm: false,
+      runWorkflow: false,
+    });
+  }
+  if (fullRows.length) {
+    strategies.push({
+      strategy: "full-rows-report",
+      rows: fullRows,
+      useForm: false,
+      runWorkflow: true,
+    });
   }
 
-  const patchUrl =
-    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}/${recordId}`;
-  const body = {
-    data: { [subform()]: rows },
-    skip_workflow: ["form_workflow", "schedules"],
+  const attempts = [];
+  for (const attempt of strategies) {
+    const result = await patchQuotationSubformRows(recordId, attempt.rows, token, attempt);
+    attempts.push({ ...attempt, ...result });
+    if (result.ok) {
+      console.log(
+        "persistSubformFileUploadUrls ok:",
+        attempt.strategy,
+        attempt.rows.map((row) => ({ ID: row.ID, File_Upload_URL: row[fileUploadUrlField()] }))
+      );
+      return {
+        attempted: true,
+        ok: true,
+        strategy: attempt.strategy,
+        patchData: result.patchData,
+        rows: attempt.rows,
+        rowUrlUpdates: entries,
+        attempts,
+      };
+    }
+    console.error("persistSubformFileUploadUrls attempt failed:", attempt.strategy, result.patchData);
+  }
+
+  const last = attempts[attempts.length - 1] || {};
+  return {
+    attempted: true,
+    ok: false,
+    error: formatCreatorError(last.patchData) || "File_Upload_URL patch failed.",
+    patchData: last.patchData,
+    rows: minimalUpdated,
+    rowUrlUpdates: entries,
+    attempts,
   };
-
-  const patchRes = await fetch(patchUrl, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Zoho-oauthtoken ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  const patchData = await patchRes.json().catch(() => ({}));
-  const ok = patchRes.ok && patchData.code === 3000;
-
-  if (!ok) {
-    console.error("persistSubformFileUploadUrls failed:", patchData, rows);
-  } else {
-    console.log(
-      "persistSubformFileUploadUrls ok:",
-      rows.map((row) => ({ ID: row.ID, File_Upload_URL: row[fileUploadUrlField()] }))
-    );
-  }
-
-  return { attempted: true, ok, patchData, rows, rowUrlUpdates: entries };
 }
 
 /*
