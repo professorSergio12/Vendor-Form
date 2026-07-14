@@ -6,7 +6,7 @@
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
- *         Item_Master, Attachment, Datasheet, File_Upload_URL (comma-separated https download URLs),
+ *         Item_Master, Attachment, Datasheet, Attachment_Filepath, Datasheet_Filepath (https download URLs),
  *         Status (per line → Pending Review)
  *
  * RFQ form RFQ_Products subform (qty source for vendor email): Product, Quantity (DECIMAL), Unit
@@ -32,8 +32,30 @@ const quotationVersionField = () =>
   process.env.CREATOR_QUOTATION_VERSION_FIELD || "Quotation_Version";
 const availableQuantityField = () =>
   process.env.CREATOR_AVAILABLE_QUANTITY_FIELD || "Available_Quantity";
-const fileUploadUrlField = () =>
-  process.env.CREATOR_FILE_UPLOAD_URL_FIELD || "File_Upload_URL";
+const attachmentFilepathField = () =>
+  process.env.CREATOR_ATTACHMENT_FILEPATH_FIELD || "Attachment_Filepath";
+const datasheetFilepathField = () =>
+  process.env.CREATOR_DATASHEET_FILEPATH_FIELD || "Datasheet_Filepath";
+
+function filepathFieldForUploadField(uploadFieldName) {
+  if (uploadFieldName === ATTACHMENT_FIELD) return attachmentFilepathField();
+  if (uploadFieldName === DATASHEET_FIELD) return datasheetFilepathField();
+  return null;
+}
+
+function applyRowFieldUpdatesToPatchRow(row, rowId, rowFieldUpdates) {
+  const updates = rowFieldUpdates?.[rowId];
+  if (!updates || typeof updates !== "object") return;
+  Object.entries(updates).forEach(([field, url]) => {
+    if (url) row[field] = url;
+  });
+}
+
+function rowFieldUpdatesHasEntries(rowFieldUpdates) {
+  return Object.values(rowFieldUpdates || {}).some(
+    (fields) => fields && typeof fields === "object" && Object.keys(fields).length > 0
+  );
+}
 
 // Report that displays Vendor_Quotations records — used to read back the
 // subform row IDs after a record is created (needed for subform file upload).
@@ -454,10 +476,9 @@ function extractFileFieldUrl(value, { recordId, subRowId, fieldName }) {
   return reference;
 }
 
-function buildWidgetStyleSubformRows(apiRecord, rowUrlUpdates) {
+function buildWidgetStyleSubformRows(apiRecord, rowFieldUpdates) {
   const sf = subform();
   const subRows = apiRecord?.[sf] || apiRecord?.Quotation_Items || [];
-  const urlField = fileUploadUrlField();
   const itemKey = "Item_Master";
   const skipKeys = new Set([
     "Added_Time",
@@ -495,17 +516,14 @@ function buildWidgetStyleSubformRows(apiRecord, rowUrlUpdates) {
     const itemMasterId = lookupId(apiRow[itemKey] || apiRow.Item_Master);
     if (itemMasterId) row[itemKey] = itemMasterId;
 
-    const urls = rowUrlUpdates[rowId];
-    if (urls?.length) {
-      row[urlField] = urls.filter(Boolean).join(",");
-    }
+    applyRowFieldUpdatesToPatchRow(row, rowId, rowFieldUpdates);
 
     return row;
   });
 }
 
-function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
-  return buildWidgetStyleSubformRows(apiRecord, rowUrlUpdates);
+function buildSubformRowsForFileUrlUpdate(apiRecord, rowFieldUpdates) {
+  return buildWidgetStyleSubformRows(apiRecord, rowFieldUpdates);
 }
 
 function buildZohoApiDownloadUrls(recordId, subRowIds, rowIndexes, filesByRow) {
@@ -514,14 +532,21 @@ function buildZohoApiDownloadUrls(recordId, subRowIds, rowIndexes, filesByRow) {
     const subRowId = subRowIds[idx];
     const rowFiles = filesByRow?.[idx] || {};
     if (!subRowId) return;
-    const urls = [];
+    if (!fallback[subRowId]) fallback[subRowId] = {};
     if (rowFiles.attachment) {
-      urls.push(buildSubformDownloadUrl(recordId, subRowId, ATTACHMENT_FIELD));
+      fallback[subRowId][attachmentFilepathField()] = buildSubformDownloadUrl(
+        recordId,
+        subRowId,
+        ATTACHMENT_FIELD
+      );
     }
     if (rowFiles.datasheet) {
-      urls.push(buildSubformDownloadUrl(recordId, subRowId, DATASHEET_FIELD));
+      fallback[subRowId][datasheetFilepathField()] = buildSubformDownloadUrl(
+        recordId,
+        subRowId,
+        DATASHEET_FIELD
+      );
     }
-    if (urls.length) fallback[subRowId] = urls;
   });
   return fallback;
 }
@@ -529,33 +554,54 @@ function buildZohoApiDownloadUrls(recordId, subRowIds, rowIndexes, filesByRow) {
 function buildFilepathFallbackUrls(uploadResults, subRowIds) {
   const fallback = {};
   (uploadResults || []).forEach((result) => {
-    if (!result?.ok || result.row == null) return;
+    if (!result?.ok || result.row == null || !result.field) return;
     const subRowId = subRowIds[result.row];
     if (!subRowId) return;
+    const filepathField = filepathFieldForUploadField(result.field);
+    if (!filepathField) return;
     const fp = extractUploadFileReference(result.data);
     if (!fp) return;
-    if (!fallback[subRowId]) fallback[subRowId] = [];
-    if (!fallback[subRowId].includes(fp)) fallback[subRowId].push(fp);
+    if (!fallback[subRowId]) fallback[subRowId] = {};
+    fallback[subRowId][filepathField] = fp;
   });
   return fallback;
 }
 
-function readSavedFileUploadUrls(record, rowIds) {
+function readSavedFilepaths(record, rowIds, expectedUpdates) {
   const subRows = record?.[subform()] || record?.Quotation_Items || [];
-  const urlField = fileUploadUrlField();
   const want = new Set((rowIds || []).map((id) => String(id)));
   const saved = {};
 
   subRows.forEach((row) => {
     const id = String(row.ID || row.id || "");
     if (!want.has(id)) return;
-    const val = row[urlField];
-    if (val != null && String(val).trim() !== "") {
-      saved[id] = String(val).trim();
+    const expected = expectedUpdates?.[id] || {};
+    const rowSaved = {};
+
+    for (const field of [attachmentFilepathField(), datasheetFilepathField()]) {
+      if (!expected[field]) continue;
+      const val = row[field];
+      if (val != null && String(val).trim() !== "") {
+        rowSaved[field] = String(val).trim();
+      }
     }
+
+    if (Object.keys(rowSaved).length) saved[id] = rowSaved;
   });
 
   return saved;
+}
+
+function verifySavedFilepaths(saved, targetRowIds, activeUpdates) {
+  return targetRowIds.every((rowId) => {
+    const expected = activeUpdates[rowId];
+    if (!expected || typeof expected !== "object") return true;
+    const savedRow = saved[rowId] || {};
+    return Object.entries(expected).every(([field, url]) => {
+      if (!url) return true;
+      return Boolean(savedRow[field]);
+    });
+  });
 }
 
 function describePatchError(patchData) {
@@ -596,7 +642,7 @@ const QUOTATION_PATCH_SCALAR_FIELDS = [
   "Delivery_Date",
 ];
 
-function buildMinimalSubformPatchRow(apiRow, rowUrlUpdates) {
+function buildMinimalSubformPatchRow(apiRow, rowFieldUpdates) {
   const rowId = String(apiRow?.ID || apiRow?.id || "");
   if (!rowId) return null;
 
@@ -626,13 +672,14 @@ function buildMinimalSubformPatchRow(apiRow, rowUrlUpdates) {
   const status = scalarPatchValue(apiRow?.[itemStatusField()]);
   if (status) row[itemStatusField()] = status;
 
-  const urls = rowUrlUpdates[rowId];
-  if (urls?.length) {
-    // One File_Upload_URL field — comma-separated for attachment + datasheet.
-    row[fileUploadUrlField()] = urls.filter(Boolean).join(",");
-  }
+  applyRowFieldUpdatesToPatchRow(row, rowId, rowFieldUpdates);
 
   return row;
+}
+
+function minimalPatchRowHasFilepathUpdate(row) {
+  if (!row) return false;
+  return Boolean(row[attachmentFilepathField()] || row[datasheetFilepathField()]);
 }
 
 async function patchQuotationSubformRows(recordId, rows, token, options = {}) {
@@ -661,17 +708,45 @@ async function patchQuotationSubformRows(recordId, rows, token, options = {}) {
   return { ok, patchData, patchUrl, rows, strategy: options.strategy || "unknown" };
 }
 
-async function runFileUrlPatchStrategies(recordId, record, rowUrlUpdates, token) {
+function buildFilepathOnlyPatchRows(rowFieldUpdates) {
+  return Object.entries(rowFieldUpdates || {})
+    .filter(([, fields]) => fields && typeof fields === "object" && Object.keys(fields).length > 0)
+    .map(([rowId, fields]) => {
+      const row = { ID: String(rowId) };
+      Object.entries(fields).forEach(([field, url]) => {
+        if (url) row[field] = url;
+      });
+      return row;
+    })
+    .filter((row) => minimalPatchRowHasFilepathUpdate(row));
+}
+
+async function runFileUrlPatchStrategies(recordId, record, rowFieldUpdates, token) {
   const subRows = record?.[subform()] || record?.Quotation_Items || [];
-  const widgetRows = buildWidgetStyleSubformRows(record, rowUrlUpdates);
+  const filepathOnlyRows = buildFilepathOnlyPatchRows(rowFieldUpdates);
+  const widgetRows = buildWidgetStyleSubformRows(record, rowFieldUpdates);
   const minimalUpdated = subRows
-    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowUrlUpdates))
-    .filter((row) => row && row[fileUploadUrlField()]);
+    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowFieldUpdates))
+    .filter((row) => minimalPatchRowHasFilepathUpdate(row));
   const minimalAll = subRows
-    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowUrlUpdates))
+    .map((apiRow) => buildMinimalSubformPatchRow(apiRow, rowFieldUpdates))
     .filter(Boolean);
 
   const strategies = [];
+  if (filepathOnlyRows.length) {
+    strategies.push({
+      strategy: "filepath-only-report-skip-all",
+      rows: filepathOnlyRows,
+      useForm: false,
+      skipWorkflow: "all",
+    });
+    strategies.push({
+      strategy: "filepath-only-report",
+      rows: filepathOnlyRows,
+      useForm: false,
+      runWorkflow: false,
+    });
+  }
   if (widgetRows.length) {
     strategies.push({
       strategy: "widget-style-report-skip-all",
@@ -732,7 +807,7 @@ async function runFileUrlPatchStrategies(recordId, record, rowUrlUpdates, token)
     patchData: last.patchData,
     rows: widgetRows,
     attempts,
-    error: describePatchError(last.patchData) || "File_Upload_URL patch failed.",
+    error: describePatchError(last.patchData) || "Attachment_Filepath/Datasheet_Filepath patch failed.",
   };
 }
 
@@ -744,12 +819,14 @@ async function collectUploadedFileUrls({
   uploadResults,
   token,
 }) {
-  const rowUrlUpdates = {};
+  const rowFieldUpdates = {};
 
   (uploadResults || []).forEach((result) => {
     if (!result?.ok || result.row == null || !result.field) return;
     const subRowId = subRowIds[result.row];
     if (!subRowId) return;
+    const filepathField = filepathFieldForUploadField(result.field);
+    if (!filepathField) return;
     const downloadUrl = resolveFileUploadDownloadUrl(
       recordId,
       subRowId,
@@ -757,10 +834,8 @@ async function collectUploadedFileUrls({
       result.data
     );
     if (!downloadUrl) return;
-    if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
-    if (!rowUrlUpdates[subRowId].includes(downloadUrl)) {
-      rowUrlUpdates[subRowId].push(downloadUrl);
-    }
+    if (!rowFieldUpdates[subRowId]) rowFieldUpdates[subRowId] = {};
+    rowFieldUpdates[subRowId][filepathField] = downloadUrl;
   });
 
   for (let attempt = 1; attempt <= 4; attempt += 1) {
@@ -776,16 +851,22 @@ async function collectUploadedFileUrls({
       const apiRow = subRows.find((row) => String(row.ID) === String(subRowId));
       if (!apiRow) return;
 
-      const urls = [];
+      if (!rowFieldUpdates[subRowId]) rowFieldUpdates[subRowId] = {};
+
       if (rowFiles.attachment) {
-        urls.push(buildPublicFileDownloadUrl(recordId, subRowId, ATTACHMENT_FIELD));
+        rowFieldUpdates[subRowId][attachmentFilepathField()] = buildPublicFileDownloadUrl(
+          recordId,
+          subRowId,
+          ATTACHMENT_FIELD
+        );
+        resolvedAny = true;
       }
       if (rowFiles.datasheet) {
-        urls.push(buildPublicFileDownloadUrl(recordId, subRowId, DATASHEET_FIELD));
-      }
-
-      if (urls.length) {
-        rowUrlUpdates[subRowId] = urls;
+        rowFieldUpdates[subRowId][datasheetFilepathField()] = buildPublicFileDownloadUrl(
+          recordId,
+          subRowId,
+          DATASHEET_FIELD
+        );
         resolvedAny = true;
       }
     });
@@ -794,7 +875,7 @@ async function collectUploadedFileUrls({
     await wait(400 * attempt);
   }
 
-  return rowUrlUpdates;
+  return rowFieldUpdates;
 }
 
 function publicApiBase() {
@@ -839,7 +920,7 @@ function buildUploadAttempts(recordId, subRowId, fieldName) {
 
 /*
  * v2.1 upload response: { code: 3000, filename, filepath, message }
- * File_Upload_URL stores the subform download API URL (https://www.zohoapis.../download).
+ * Attachment_Filepath / Datasheet_Filepath store public download URLs.
  */
 function extractUploadFileReference(data) {
   if (!data || typeof data !== "object") return "";
@@ -974,31 +1055,35 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
   return best || { ok: false, field: fieldName, status: 0, data: {}, raw: "", fileUrl: "" };
 }
 
-async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, options = {}) {
+async function persistSubformFileUploadUrls(recordId, rowFieldUpdates, token, options = {}) {
   const uploadResults = options.uploadResults || [];
   const subRowIds = options.subRowIds || [];
   const rowIndexes = options.rowIndexes || [];
   const filesByRow = options.filesByRow || {};
-  const entries = Object.entries(rowUrlUpdates || {}).filter(
-    ([, urls]) => Array.isArray(urls) && urls.length
+  const entries = Object.entries(rowFieldUpdates || {}).filter(
+    ([, fields]) => fields && typeof fields === "object" && Object.keys(fields).length > 0
   );
   if (!entries.length) {
     return { attempted: false, ok: true, rows: [] };
   }
 
   const targetRowIds = entries.map(([rowId]) => String(rowId));
-  let activeUpdates = { ...rowUrlUpdates };
+  let activeUpdates = { ...rowFieldUpdates };
 
   for (let round = 1; round <= 3; round += 1) {
     if (round === 2) {
       const fallback = buildFilepathFallbackUrls(uploadResults, subRowIds);
-      if (!Object.keys(fallback).length) continue;
-      console.warn("File_Upload_URL public URL not verified; retrying with filepath.");
+      if (!rowFieldUpdatesHasEntries(fallback)) continue;
+      console.warn(
+        "Attachment_Filepath/Datasheet_Filepath public URL not verified; retrying with filepath."
+      );
       activeUpdates = fallback;
     } else if (round === 3) {
       const zohoFallback = buildZohoApiDownloadUrls(recordId, subRowIds, rowIndexes, filesByRow);
-      if (!Object.keys(zohoFallback).length) break;
-      console.warn("File_Upload_URL filepath not verified; retrying with Zoho API download URL.");
+      if (!rowFieldUpdatesHasEntries(zohoFallback)) break;
+      console.warn(
+        "Attachment_Filepath/Datasheet_Filepath filepath not verified; retrying with Zoho API download URL."
+      );
       activeUpdates = zohoFallback;
     } else {
       await wait(600);
@@ -1009,7 +1094,7 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, opti
       return {
         attempted: true,
         ok: false,
-        error: "Could not read quotation record before File_Upload_URL patch.",
+        error: "Could not read quotation record before filepath patch.",
         rows: [],
       };
     }
@@ -1023,20 +1108,23 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, opti
         error: patchResult.error,
         patchData: patchResult.patchData,
         rows: patchResult.rows,
-        rowUrlUpdates: entries,
+        rowFieldUpdates: entries,
         attempts: patchResult.attempts,
       };
     }
 
     await wait(500);
     const verifiedRecord = await getQuotationRecordById(recordId, token);
-    const saved = readSavedFileUploadUrls(verifiedRecord, targetRowIds);
-    const allSaved = targetRowIds.every((rowId) => Boolean(saved[rowId]));
+    const saved = readSavedFilepaths(verifiedRecord, targetRowIds, activeUpdates);
+    const allSaved = verifySavedFilepaths(saved, targetRowIds, activeUpdates);
 
     console.log(
       "persistSubformFileUploadUrls ok:",
       patchResult.strategy,
-      targetRowIds.map((rowId) => ({ ID: rowId, File_Upload_URL: saved[rowId] || activeUpdates[rowId]?.join(",") }))
+      targetRowIds.map((rowId) => ({
+        ID: rowId,
+        ...(saved[rowId] || activeUpdates[rowId] || {}),
+      }))
     );
 
     if (allSaved || round === 3) {
@@ -1047,10 +1135,12 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, opti
         strategy: patchResult.strategy,
         patchData: patchResult.patchData,
         rows: patchResult.rows,
-        rowUrlUpdates: entries,
+        rowFieldUpdates: entries,
         saved,
         attempts: patchResult.attempts,
-        error: allSaved ? null : "File_Upload_URL patch returned ok but field is still empty in Creator.",
+        error: allSaved
+          ? null
+          : "Filepath patch returned ok but Attachment_Filepath/Datasheet_Filepath is still empty in Creator.",
       };
     }
   }
@@ -1058,9 +1148,9 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, opti
   return {
     attempted: true,
     ok: false,
-    error: "File_Upload_URL could not be saved after upload.",
+    error: "Attachment_Filepath/Datasheet_Filepath could not be saved after upload.",
     rows: [],
-    rowUrlUpdates: entries,
+    rowFieldUpdates: entries,
   };
 }
 
@@ -1123,7 +1213,7 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     }
   }
 
-  const rowUrlUpdates = await collectUploadedFileUrls({
+  const rowFieldUpdates = await collectUploadedFileUrls({
     recordId,
     subRowIds,
     rowIndexes,
@@ -1132,7 +1222,7 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     token,
   });
 
-  const fileUrlPatch = await persistSubformFileUploadUrls(recordId, rowUrlUpdates, token, {
+  const fileUrlPatch = await persistSubformFileUploadUrls(recordId, rowFieldUpdates, token, {
     uploadResults,
     subRowIds,
     rowIndexes,
@@ -1146,7 +1236,7 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     attempted: true,
     subRowIds,
     results: uploadResults,
-    rowUrlUpdates,
+    rowFieldUpdates,
     fileUrlPatch,
     allOk,
     error: allOk
@@ -1158,7 +1248,7 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
               `row ${r.row ?? "?"} ${r.field || r.kind || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
             ),
           fileUrlPatch.attempted && !fileUrlPatch.ok
-            ? `File_Upload_URL patch failed: ${fileUrlPatch.error || describePatchError(fileUrlPatch.patchData)}`
+            ? `Filepath patch failed: ${fileUrlPatch.error || describePatchError(fileUrlPatch.patchData)}`
             : null,
         ]
           .filter(Boolean)

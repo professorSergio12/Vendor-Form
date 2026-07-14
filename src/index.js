@@ -92,7 +92,7 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
         console.warn("RFQ Vendor_Response_Status update failed:", result.vendorStatus);
       }
       if (fileUrlFailed) {
-        console.warn("File_Upload_URL patch failed:", fileUrlPatch);
+        console.warn("Attachment_Filepath/Datasheet_Filepath patch failed:", fileUrlPatch);
       }
       return res.json({
         ok: true,
@@ -108,7 +108,7 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
           : null,
         fileUrlWarning: fileUrlFailed
           ? fileUrlPatch.error ||
-            "Quotation saved and files uploaded, but File_Upload_URL was not updated in Creator."
+            "Quotation saved and files uploaded, but Attachment_Filepath/Datasheet_Filepath was not updated in Creator."
           : null,
         vendorStatusWarning: vendorStatusFailed
           ? result.vendorStatus.error ||
