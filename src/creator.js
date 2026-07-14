@@ -4,9 +4,11 @@
  * Parent: RFQ, Vendor_Master, Submission_Date, Margin,
  *         Total_Amount (grand total), Delivery_Date, Currency
  *
- * Subform Quotation_Items: Description, Quantity, Unit_Price, GST (%),
+ * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
  *         Item_Master, Attachment, Datasheet, Status (per line → Pending Review)
+ *
+ * Parent Quotation_Version: v0 first submit per RFQ+vendor, then v1, v2, …
  */
 import { getAccessToken } from "./zohoToken.js";
 import axios from "axios";
@@ -23,6 +25,10 @@ const rfqField = () => process.env.CREATOR_RFQ_FIELD || "RFQ";
 const vendorField = () => process.env.CREATOR_VENDOR_FIELD || "Vendor_Master";
 const defaultStatus = () => process.env.CREATOR_DEFAULT_STATUS || "Pending Review";
 const itemStatusField = () => process.env.CREATOR_ITEM_STATUS_FIELD || "Status";
+const quotationVersionField = () =>
+  process.env.CREATOR_QUOTATION_VERSION_FIELD || "Quotation_Version";
+const availableQuantityField = () =>
+  process.env.CREATOR_AVAILABLE_QUANTITY_FIELD || "Available_Quantity";
 
 // Report that displays Vendor_Quotations records — used to read back the
 // subform row IDs after a record is created (needed for subform file upload).
@@ -170,6 +176,62 @@ async function resolveRfqId(p, token) {
   return resolveRecordId(RFQ_REPORT, RFQ_MATCH_FIELD, p.rfqNumber, token);
 }
 
+function parseQuotationVersionNumber(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const match = text.match(/^v?(\d+)$/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isNaN(n) ? null : n;
+}
+
+function formatQuotationVersion(versionNumber) {
+  return `v${Math.max(0, Number(versionNumber) || 0)}`;
+}
+
+/*
+ * List prior Vendor_Quotations for the same RFQ + vendor (per-vendor revision chain).
+ */
+async function listVendorQuotationsForRfq(rfqId, vendorId, token) {
+  if (!rfqId || !vendorId) return [];
+
+  const criteriaAttempts = [
+    `(${rfqField()} == ${rfqId}) && (${vendorField()} == ${vendorId})`,
+    `(${rfqField()}.ID == ${rfqId}) && (${vendorField()}.ID == ${vendorId})`,
+  ];
+
+  for (const criteria of criteriaAttempts) {
+    try {
+      const url =
+        `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}` +
+        `?criteria=${encodeURIComponent(criteria)}&max_records=200&field_config=all`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Zoho-oauthtoken ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.code === 3000 && Array.isArray(data.data) && data.data.length) {
+        return data.data;
+      }
+    } catch (e) {
+      console.warn(`listVendorQuotationsForRfq criteria failed (${criteria}):`, e);
+    }
+  }
+  return [];
+}
+
+async function resolveNextQuotationVersion(rfqId, vendorId, token) {
+  const rows = await listVendorQuotationsForRfq(rfqId, vendorId, token);
+  let maxVersion = -1;
+  const versionKey = quotationVersionField();
+
+  rows.forEach((row) => {
+    const parsed = parseQuotationVersionNumber(row[versionKey]);
+    if (parsed != null && parsed > maxVersion) maxVersion = parsed;
+  });
+
+  return formatQuotationVersion(maxVersion + 1);
+}
+
 export function formatCreatorError(data) {
   if (Array.isArray(data?.error) && data.error.length) return data.error.join("; ");
   return data?.message || data?.description || "Zoho Creator rejected the submission.";
@@ -272,6 +334,11 @@ export function buildSubformRow(p) {
 
   if (p.itemMasterId) {
     row.Item_Master = p.itemMasterId;
+  }
+
+  const availQty = num(p.availableQuantity, NaN);
+  if (!Number.isNaN(availQty) && availQty >= 0) {
+    row[availableQuantityField()] = availQty;
   }
 
   return { row, lineSubtotal, gstAmount, lineTotal };
@@ -1101,6 +1168,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           price: line.price,
           gst: line.gst,
           remarks: line.remarks,
+          availableQuantity: line.availableQuantity,
           uniqueId: line.uniqueId || flatPayload.uniqueId,
         }));
       }
@@ -1149,6 +1217,12 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   if (vendorId) data[vendorField()] = vendorId;
   if (rfqId) data[rfqField()] = rfqId;
 
+  let quotationVersion = formatQuotationVersion(0);
+  if (rfqId && vendorId) {
+    quotationVersion = await resolveNextQuotationVersion(rfqId, vendorId, token);
+  }
+  data[quotationVersionField()] = quotationVersion;
+
   const url = `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/form/${form()}`;
   const res = await fetch(url, {
     method: "POST",
@@ -1189,6 +1263,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     status: res.status,
     data: respData,
     recordId,
+    quotationVersion,
     resolved: { vendorId, rfqId, itemMasters: resolvedItemMasters },
     uploads,
     vendorStatus,

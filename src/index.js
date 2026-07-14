@@ -80,6 +80,7 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
         ok: true,
         uniqueId: p.uniqueId,
         recordId: result.recordId,
+        quotationVersion: result.quotationVersion,
         resolved: result.resolved,
         uploads: result.uploads,
         vendorStatus: result.vendorStatus,

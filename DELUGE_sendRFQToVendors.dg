@@ -1,6 +1,6 @@
 // AiraTrex — sendRFQToVendors
 // Paste into Zoho Creator → Functions → sendRFQToVendors (edit existing)
-// Adds item descriptions from RFQ_Products / Item Master → React form URL param: descriptions
+// Description from widget rfqPayload JSON (Product_Description) - passed through to React URL
 
 string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, string rfqPayload)
 {
@@ -99,43 +99,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: no items parsed - add rfqPayload (string) param to Custom API";
 	}
-	// Description lookup from RFQ_Products (Product id → Description), then Items form
-	descByItemId = Map();
-	if(rfqRecordId != null && rfqRecordId != "")
-	{
-		try
-		{
-			rfqRecDesc = RFQ[ID == rfqRecordId.toLong()];
-			if(rfqRecDesc.count() > 0)
-			{
-				for each  prodRow in rfqRecDesc.RFQ_Products
-				{
-					productId = "";
-					try
-					{
-						if(prodRow.Product != null)
-						{
-							productId = ifnull(prodRow.Product.ID,"").toString();
-						}
-					}
-					catch (e)
-					{
-						productId = ifnull(prodRow.Product,"").toString();
-					}
-					descVal = ifnull(prodRow.Description,"");
-					descPlain = (descVal + "").trim();
-					if(productId != "" && descPlain != "")
-					{
-						descByItemId.put(productId,descPlain.trim());
-					}
-				}
-			}
-		}
-		catch (e)
-		{
-			descByItemId = Map();
-		}
-	}
+	// Description comes from widget rfqPayload (JSON) - do not re-fetch from Items (Deluge corrupts spacing)
 	// Normalize vendorRecordId
 	resolvedItems = List();
 	for each  item in normalizedItems
@@ -207,31 +171,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			newItem.put("vendorId",vendorId);
 			newItem.put("vendorRecordId",resolvedVendorId);
 			newItem.put("vendorEmail",vendorEmail);
-			itemDesc = ifnull(item.get("description"),"");
-			if(itemDesc == null || itemDesc == "")
-			{
-				itemIdKey = ifnull(item.get("itemId"),"");
-				if(itemIdKey != "" && descByItemId.containKey(itemIdKey))
-				{
-					itemDesc = descByItemId.get(itemIdKey);
-				}
-				if((itemDesc == null || itemDesc == "") && itemIdKey != "")
-				{
-					try
-					{
-						imRec = Items[ID == itemIdKey.toLong()];
-						if(imRec.count() > 0)
-						{
-							itemDesc = (imRec.Product_Description + "").trim();
-						}
-					}
-					catch (e)
-					{
-						itemDesc = "";
-					}
-				}
-			}
-			newItem.put("description",ifnull(itemDesc,"").trim());
+			newItem.put("description",ifnull(item.get("description"),"").trim());
 			resolvedItems.add(newItem);
 		}
 	}
@@ -296,6 +236,27 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		{
 			continue;
 		}
+		if(vendorName == null || vendorName == "")
+		{
+			try
+			{
+				vendorRecByCode = Vendor_Master[Vendor_Code == vendorId];
+				if(vendorRecByCode.count() > 0)
+				{
+					vendorName = ifnull(vendorRecByCode.Vendor_Name,"");
+				}
+			}
+			catch (e)
+			{
+				vendorName = "";
+			}
+		}
+		displayVendorName = vendorName;
+		if(displayVendorName == null || displayVendorName == "")
+		{
+			displayVendorName = "Team";
+		}
+		displayVendorName = displayVendorName.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 		itemIdsStr = "";
 		productNamesStr = "";
 		quantitiesStr = "";
@@ -309,11 +270,8 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			productName = ifnull(item.get("productName"),"");
 			quantity = ifnull(item.get("quantity"),"");
 			unit = ifnull(item.get("unit"),"");
-			description = "";
-			if(itemId != "" && descByItemId.containKey(itemId))
-			{
-				description = (descByItemId.get(itemId) + "").trim();
-			}
+			description = ifnull(item.get("description"),"").trim();
+			description = description.replaceAll("|"," ");
 			if(description == null || description == "")
 			{
 				if(itemId != null && itemId != "")
@@ -332,7 +290,18 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					}
 				}
 			}
-			description = (description + "").trim().replaceAll("|"," ");
+			displayProductName = productName;
+			displayDescription = description;
+			if(displayProductName == null || displayProductName == "")
+			{
+				displayProductName = "-";
+			}
+			if(displayDescription == null || displayDescription == "")
+			{
+				displayDescription = "-";
+			}
+			displayProductName = displayProductName.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			displayDescription = displayDescription.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			if(itemId != null && itemId != "")
 			{
 				emailedIds.add(itemId);
@@ -356,8 +325,9 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				qtyDisplay = quantity + " " + unit;
 			}
 			tableRows = tableRows + "<tr>";
-			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:600;'>" + productName + "</td>";
-			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:center;'>" + qtyDisplay + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:600;vertical-align:top;'>" + displayProductName + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:center;vertical-align:top;white-space:nowrap;'>" + qtyDisplay + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:13px;line-height:1.5;color:#5a6472;vertical-align:top;word-wrap:break-word;'>" + displayDescription + "</td>";
 			tableRows = tableRows + "</tr>";
 		}
 		vendorUid = rfqNumber + "_" + vendorRecordId;
@@ -385,23 +355,25 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		emailBody = emailBody + "<body style='margin:0;padding:0;background-color:#f4f5f7;font-family:Arial,Helvetica,sans-serif;'>";
 		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='background-color:#f4f5f7;padding:24px 12px;'><tr><td align='center'>";
 		emailBody = emailBody + "<table width='600' cellpadding='0' cellspacing='0' style='max-width:600px;width:100%;background-color:#ffffff;border:1px solid #e9ecf1;border-radius:14px;overflow:hidden;'>";
-		emailBody = emailBody + "<tr><td style='background:linear-gradient(135deg,#f15a24 0%,#d94a17 100%);padding:24px 28px;'>";
-		emailBody = emailBody + "<div style='font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#ffe8dc;'>AiraTrex Sourcing Desk</div>";
+		emailBody = emailBody + "<tr><td style='background:linear-gradient(135deg,#2f6fed 0%,#1d4ed8 100%);padding:24px 28px;'>";
+		emailBody = emailBody + "<div style='font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#dbeafe;'>AiraTrex Sourcing Desk</div>";
 		emailBody = emailBody + "<div style='font-size:24px;font-weight:800;color:#ffffff;margin-top:6px;'>Request for Quotation</div>";
-		emailBody = emailBody + "<div style='font-size:13px;color:#fff4ee;margin-top:8px;'>RFQ Reference: <strong>" + rfqNumber + "</strong></div>";
+		emailBody = emailBody + "<div style='font-size:13px;color:#e6efff;margin-top:8px;'>RFQ Reference: <strong style='color:#ffffff;'>" + rfqNumber + "</strong></div>";
+		emailBody = emailBody + "<div style='font-size:13px;color:#e6efff;margin-top:4px;'>Vendor: <strong style='color:#ffffff;'>" + displayVendorName + "</strong></div>";
 		emailBody = emailBody + "</td></tr>";
 		emailBody = emailBody + "<tr><td style='padding:28px;'>";
-		emailBody = emailBody + "<p style='margin:0 0 14px;font-size:15px;color:#1f2733;'>Dear Team,</p>";
-		emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please submit your quote for all item(s) below using the single form link.</p>";
+		emailBody = emailBody + "<p style='margin:0 0 14px;font-size:15px;color:#1f2733;'>Dear " + displayVendorName + ",</p>";
+		emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please review the item(s) below and submit your quote using the form link at the end of this email.</p>";
 		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;border:1px solid #e9ecf1;border-radius:10px;overflow:hidden;'>";
 		emailBody = emailBody + "<tr style='background-color:#fafbfc;'>";
-		emailBody = emailBody + "<th align='left' style='padding:12px 16px;font-size:11px;text-transform:uppercase;color:#8a94a3;border-bottom:1px solid #e9ecf1;'>Product</th>";
-		emailBody = emailBody + "<th align='center' style='padding:12px 16px;font-size:11px;text-transform:uppercase;color:#8a94a3;border-bottom:1px solid #e9ecf1;'>Quantity</th>";
+		emailBody = emailBody + "<th align='left' style='padding:12px 16px;font-size:11px;font-weight:700;text-transform:uppercase;color:#000000;border-bottom:1px solid #e9ecf1;'>Product Name</th>";
+		emailBody = emailBody + "<th align='center' style='padding:12px 16px;font-size:11px;font-weight:700;text-transform:uppercase;color:#000000;border-bottom:1px solid #e9ecf1;width:110px;'>Qty</th>";
+		emailBody = emailBody + "<th align='left' style='padding:12px 16px;font-size:11px;font-weight:700;text-transform:uppercase;color:#000000;border-bottom:1px solid #e9ecf1;'>Description</th>";
 		emailBody = emailBody + "</tr>";
 		emailBody = emailBody + tableRows;
 		emailBody = emailBody + "</table>";
-		emailBody = emailBody + "<p style='margin:24px 0 0;text-align:center;'>";
-		emailBody = emailBody + "<a href='" + dynamicFormUrl + "' style='display:inline-block;background-color:#f15a24;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;font-size:15px;font-weight:700;'>Submit Quotation for All Items</a>";
+		emailBody = emailBody + "<p style='margin:28px 0 0;text-align:center;'>";
+		emailBody = emailBody + "<a href='" + dynamicFormUrl + "' style='display:inline-block;background-color:#2f6fed;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;font-size:15px;font-weight:700;'>Submit Quotation for All Items</a>";
 		emailBody = emailBody + "</p>";
 		emailBody = emailBody + "<p style='margin:24px 0 0;font-size:14px;color:#1f2733;'>Regards,<br><strong>Sourcing Desk Team</strong></p>";
 		emailBody = emailBody + "</td></tr></table></td></tr></table></body></html>";
