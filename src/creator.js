@@ -6,7 +6,7 @@
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
- *         Item_Master, Attachment, Datasheet, Status (per line → Pending Review)
+ *         Item_Master, Attachment, Datasheet, File_Upload_URL, Status (per line → Pending Review)
  *
  * Parent Quotation_Version: v0 first submit per RFQ+vendor, then v1, v2, …
  */
@@ -29,6 +29,8 @@ const quotationVersionField = () =>
   process.env.CREATOR_QUOTATION_VERSION_FIELD || "Quotation_Version";
 const availableQuantityField = () =>
   process.env.CREATOR_AVAILABLE_QUANTITY_FIELD || "Available_Quantity";
+const fileUploadUrlField = () =>
+  process.env.CREATOR_FILE_UPLOAD_URL_FIELD || "File_Upload_URL";
 
 // Report that displays Vendor_Quotations records — used to read back the
 // subform row IDs after a record is created (needed for subform file upload).
@@ -376,6 +378,13 @@ async function getAllSubformRowIds(recordId, token) {
   return extractAllSubformRowIds(rec);
 }
 
+function buildSubformDownloadUrl(recordId, subRowId, fieldName) {
+  const base =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
+  const dotted = `${subform()}.${fieldName}`;
+  return `${base}/${recordId}/${dotted}/${subRowId}/download`;
+}
+
 function buildUploadAttempts(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
@@ -389,6 +398,39 @@ function buildUploadAttempts(recordId, subRowId, fieldName) {
       extraFields: {},
     },
   ];
+}
+
+/*
+ * Zoho upload may return file_url / url, or filepath — build a download URL as fallback.
+ */
+function extractUploadedFileUrl(data, { recordId, subRowId, fieldName }) {
+  if (!data || typeof data !== "object") return "";
+
+  const nested = data.data && typeof data.data === "object" ? data.data : null;
+  const candidates = [
+    data.file_url,
+    data.url,
+    data.download_url,
+    data.filepath,
+    data.filename,
+    nested?.file_url,
+    nested?.url,
+    nested?.download_url,
+    nested?.filepath,
+    nested?.filename,
+  ];
+
+  for (const candidate of candidates) {
+    const text = String(candidate ?? "").trim();
+    if (!text) continue;
+    if (/^https?:\/\//i.test(text)) return text;
+  }
+
+  if ((data.filepath || data.filename) && recordId && subRowId && fieldName) {
+    return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+  }
+
+  return "";
 }
 
 function describeUploadError(status, data, raw) {
@@ -441,7 +483,15 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
       const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
 
       if (ok) {
-        return { ok: true, field: fieldName, status: res.status, data, url: attempt.url };
+        const fileUrl = extractUploadedFileUrl(data, { recordId, subRowId, fieldName });
+        return {
+          ok: true,
+          field: fieldName,
+          status: res.status,
+          data,
+          fileUrl,
+          url: attempt.url,
+        };
       }
 
       const failure = {
@@ -474,7 +524,46 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
   }
 
   const best = failures.find((f) => f.data?.description || f.data?.message) || failures[0];
-  return best || { ok: false, field: fieldName, status: 0, data: {}, raw: "" };
+  return best || { ok: false, field: fieldName, status: 0, data: {}, raw: "", fileUrl: "" };
+}
+
+async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token) {
+  const entries = Object.entries(rowUrlUpdates || {}).filter(
+    ([, urls]) => Array.isArray(urls) && urls.length
+  );
+  if (!entries.length) {
+    return { attempted: false, ok: true, rows: [] };
+  }
+
+  const field = fileUploadUrlField();
+  const rows = entries.map(([subRowId, urls]) => ({
+    ID: subRowId,
+    [field]: urls.filter(Boolean).join(","),
+  }));
+
+  const patchUrl =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}/${recordId}`;
+  const body = {
+    data: { [subform()]: rows },
+    skip_workflow: ["form_workflow", "schedules"],
+  };
+
+  const patchRes = await fetch(patchUrl, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const patchData = await patchRes.json().catch(() => ({}));
+  const ok = patchRes.ok && patchData.code === 3000;
+
+  if (!ok) {
+    console.error("persistSubformFileUploadUrls failed:", patchData, rows);
+  }
+
+  return { attempted: true, ok, patchData, rows };
 }
 
 /*
@@ -511,6 +600,8 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     };
   }
 
+  const rowUrlUpdates = {};
+
   for (const idx of rowIndexes) {
     const rowFiles = filesByRow[idx] || {};
     const subRowId = subRowIds[idx];
@@ -527,6 +618,10 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
       try {
         const r = await uploadSubformFile(recordId, subRowId, field, file, token);
         results.push({ ...r, row: idx });
+        if (r.ok && r.fileUrl) {
+          if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
+          rowUrlUpdates[subRowId].push(r.fileUrl);
+        }
       } catch (e) {
         console.error(`Upload ${kind} row ${idx} threw:`, e);
         results.push({ ok: false, row: idx, field, error: e.message });
@@ -534,19 +629,28 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     }
   }
 
-  const allOk = results.every((r) => r.ok);
+  const fileUrlPatch = await persistSubformFileUploadUrls(recordId, rowUrlUpdates, token);
+
+  const allOk = results.every((r) => r.ok) && (!fileUrlPatch.attempted || fileUrlPatch.ok);
   return {
     attempted: true,
     subRowIds,
     results,
+    fileUrlPatch,
     allOk,
     error: allOk
       ? null
-      : results
-          .filter((r) => !r.ok)
-          .map((r) =>
-            `row ${r.row ?? "?"} ${r.field || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
-          )
+      : [
+          ...results
+            .filter((r) => !r.ok)
+            .map((r) =>
+              `row ${r.row ?? "?"} ${r.field || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
+            ),
+          fileUrlPatch.attempted && !fileUrlPatch.ok
+            ? `File_Upload_URL patch failed: ${formatCreatorError(fileUrlPatch.patchData)}`
+            : null,
+        ]
+          .filter(Boolean)
           .join("; "),
   };
 }
