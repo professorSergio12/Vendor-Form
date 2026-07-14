@@ -6,7 +6,7 @@
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
  *         Total_Amount (line), Delivery_Date, Currency (dropdown label),
- *         Item_Master, Attachment, Datasheet, File_Upload_URL (comma-separated refs/URLs),
+ *         Item_Master, Attachment, Datasheet, File_Upload_URL (comma-separated https download URLs),
  *         Status (per line → Pending Review)
  *
  * RFQ form RFQ_Products subform (qty source for vendor email): Product, Quantity (DECIMAL), Unit
@@ -606,20 +606,19 @@ async function collectUploadedFileUrls({
   const rowUrlUpdates = {};
 
   (uploadResults || []).forEach((result) => {
-    if (!result?.ok || result.row == null) return;
+    if (!result?.ok || result.row == null || !result.field) return;
     const subRowId = subRowIds[result.row];
     if (!subRowId) return;
-    let fileRef = result.fileRef || result.fileUrl;
-    if (!fileRef && result.data) {
-      fileRef = extractUploadFileReference(result.data);
-    }
-    if (!fileRef && result.field) {
-      fileRef = buildSubformDownloadUrl(recordId, subRowId, result.field);
-    }
-    if (!fileRef) return;
+    const downloadUrl = resolveFileUploadDownloadUrl(
+      recordId,
+      subRowId,
+      result.field,
+      result.data
+    );
+    if (!downloadUrl) return;
     if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
-    if (!rowUrlUpdates[subRowId].includes(fileRef)) {
-      rowUrlUpdates[subRowId].push(fileRef);
+    if (!rowUrlUpdates[subRowId].includes(downloadUrl)) {
+      rowUrlUpdates[subRowId].push(downloadUrl);
     }
   });
 
@@ -638,12 +637,10 @@ async function collectUploadedFileUrls({
 
       const urls = [];
       if (rowFiles.attachment) {
-        const attachmentRef = extractFileFieldReference(apiRow[ATTACHMENT_FIELD]);
-        if (attachmentRef) urls.push(attachmentRef);
+        urls.push(buildSubformDownloadUrl(recordId, subRowId, ATTACHMENT_FIELD));
       }
       if (rowFiles.datasheet) {
-        const datasheetRef = extractFileFieldReference(apiRow[DATASHEET_FIELD]);
-        if (datasheetRef) urls.push(datasheetRef);
+        urls.push(buildSubformDownloadUrl(recordId, subRowId, DATASHEET_FIELD));
       }
 
       if (urls.length) {
@@ -666,6 +663,13 @@ function buildSubformDownloadUrl(recordId, subRowId, fieldName) {
   return `${base}/${recordId}/${dotted}/${subRowId}/download`;
 }
 
+function resolveFileUploadDownloadUrl(recordId, subRowId, fieldName, uploadData) {
+  if (!recordId || !subRowId || !fieldName) return "";
+  const fromResponse = extractUploadedFileUrl(uploadData, { recordId, subRowId, fieldName });
+  if (fromResponse && /^https?:\/\//i.test(fromResponse)) return fromResponse;
+  return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+}
+
 function buildUploadAttempts(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
@@ -684,7 +688,7 @@ function buildUploadAttempts(recordId, subRowId, fieldName) {
 
 /*
  * v2.1 upload response: { code: 3000, filename, filepath, message }
- * Store filepath in File_Upload_URL — not the OAuth download API URL.
+ * File_Upload_URL stores the subform download API URL (https://www.zohoapis.../download).
  */
 function extractUploadFileReference(data) {
   if (!data || typeof data !== "object") return "";
@@ -774,14 +778,14 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
       const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
 
       if (ok) {
-        const fileRef = extractUploadFileReference(data);
+        const downloadUrl = resolveFileUploadDownloadUrl(recordId, subRowId, fieldName, data);
         return {
           ok: true,
           field: fieldName,
           status: res.status,
           data,
-          fileRef: fileRef || buildSubformDownloadUrl(recordId, subRowId, fieldName),
-          fileUrl: fileRef || buildSubformDownloadUrl(recordId, subRowId, fieldName),
+          fileRef: downloadUrl,
+          fileUrl: downloadUrl,
           url: attempt.url,
         };
       }
