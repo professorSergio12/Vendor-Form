@@ -378,6 +378,174 @@ async function getAllSubformRowIds(recordId, token) {
   return extractAllSubformRowIds(rec);
 }
 
+async function getQuotationRecordById(recordId, token) {
+  const url =
+    `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}` +
+    `/${recordId}?field_config=all`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (data.code !== 3000) {
+    console.error("getQuotationRecordById failed:", data);
+    return null;
+  }
+  const rec = Array.isArray(data.data) ? data.data[0] : data.data;
+  return rec || null;
+}
+
+function fileFieldHasUpload(value) {
+  if (value == null || value === "") return false;
+  if (Array.isArray(value)) return value.some((entry) => fileFieldHasUpload(entry));
+  if (typeof value === "object") {
+    return Boolean(
+      value.url ||
+        value.file_url ||
+        value.download_url ||
+        value.filepath ||
+        value.filename ||
+        value.display_value ||
+        value.zc_display_value ||
+        value.value
+    );
+  }
+  const text = String(value).trim();
+  return text.length > 0 && !/^select file$/i.test(text);
+}
+
+function extractFileFieldUrl(value, { recordId, subRowId, fieldName }) {
+  if (!fileFieldHasUpload(value)) return "";
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => extractFileFieldUrl(entry, { recordId, subRowId, fieldName }))
+      .filter(Boolean)
+      .join(",");
+  }
+
+  if (typeof value === "object") {
+    const direct = value.url || value.file_url || value.download_url || value.value;
+    if (direct && /^https?:\/\//i.test(String(direct))) return String(direct).trim();
+    if (value.filepath || value.filename || value.display_value || value.zc_display_value) {
+      return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+    }
+    return "";
+  }
+
+  const text = String(value).trim();
+  if (/^https?:\/\//i.test(text)) return text;
+  if (text) return buildSubformDownloadUrl(recordId, subRowId, fieldName);
+  return "";
+}
+
+function buildSubformRowsForFileUrlUpdate(apiRecord, rowUrlUpdates) {
+  const sf = subform();
+  const subRows = apiRecord?.[sf] || apiRecord?.Quotation_Items || [];
+  const urlField = fileUploadUrlField();
+  const itemKey = "Item_Master";
+  const skipKeys = new Set([
+    "Added_Time",
+    "Added_User",
+    "Modified_Time",
+    "Modified_User",
+    "Record_Status",
+    "zc_display_value",
+  ]);
+
+  return (Array.isArray(subRows) ? subRows : []).map((apiRow) => {
+    const rowId = String(apiRow.ID || apiRow.id || "");
+    const row = { ID: rowId };
+
+    Object.keys(apiRow || {}).forEach((key) => {
+      if (skipKeys.has(key)) return;
+      if (key === "ID" || key === "id") return;
+      if (key === ATTACHMENT_FIELD || key === DATASHEET_FIELD) return;
+      const val = apiRow[key];
+      if (val == null || val === "") return;
+      row[key] = val;
+    });
+
+    const itemMasterId = lookupId(apiRow[itemKey] || apiRow.Item_Master);
+    if (itemMasterId) row[itemKey] = itemMasterId;
+
+    const urls = rowUrlUpdates[rowId];
+    if (urls && urls.length) {
+      row[urlField] = urls.filter(Boolean).join(",");
+    }
+
+    return row;
+  });
+}
+
+async function collectUploadedFileUrls({
+  recordId,
+  subRowIds,
+  rowIndexes,
+  filesByRow,
+  uploadResults,
+  token,
+}) {
+  const rowUrlUpdates = {};
+
+  (uploadResults || []).forEach((result) => {
+    if (!result?.ok || result.row == null) return;
+    const subRowId = subRowIds[result.row];
+    if (!subRowId) return;
+    let fileUrl = result.fileUrl;
+    if (!fileUrl && result.field) {
+      fileUrl = buildSubformDownloadUrl(recordId, subRowId, result.field);
+    }
+    if (!fileUrl) return;
+    if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
+    if (!rowUrlUpdates[subRowId].includes(fileUrl)) {
+      rowUrlUpdates[subRowId].push(fileUrl);
+    }
+  });
+
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const record = await getQuotationRecordById(recordId, token);
+    const subRows = record?.[subform()] || record?.Quotation_Items || [];
+    let resolvedAny = false;
+
+    rowIndexes.forEach((idx) => {
+      const subRowId = subRowIds[idx];
+      const rowFiles = filesByRow[idx] || {};
+      if (!subRowId) return;
+
+      const apiRow = subRows.find((row) => String(row.ID) === String(subRowId));
+      if (!apiRow) return;
+
+      const urls = [];
+      if (rowFiles.attachment) {
+        const attachmentUrl = extractFileFieldUrl(apiRow[ATTACHMENT_FIELD], {
+          recordId,
+          subRowId,
+          fieldName: ATTACHMENT_FIELD,
+        });
+        if (attachmentUrl) urls.push(attachmentUrl);
+      }
+      if (rowFiles.datasheet) {
+        const datasheetUrl = extractFileFieldUrl(apiRow[DATASHEET_FIELD], {
+          recordId,
+          subRowId,
+          fieldName: DATASHEET_FIELD,
+        });
+        if (datasheetUrl) urls.push(datasheetUrl);
+      }
+
+      if (urls.length) {
+        rowUrlUpdates[subRowId] = urls;
+        resolvedAny = true;
+      }
+    });
+
+    if (resolvedAny || attempt === 4) break;
+    await wait(400 * attempt);
+  }
+
+  return rowUrlUpdates;
+}
+
 function buildSubformDownloadUrl(recordId, subRowId, fieldName) {
   const base =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}`;
@@ -483,7 +651,10 @@ async function uploadSubformFile(recordId, subRowId, fieldName, file, token) {
       const ok = res.status >= 200 && res.status < 300 && Number(data.code) === 3000;
 
       if (ok) {
-        const fileUrl = extractUploadedFileUrl(data, { recordId, subRowId, fieldName });
+        let fileUrl = extractUploadedFileUrl(data, { recordId, subRowId, fieldName });
+        if (!fileUrl) {
+          fileUrl = buildSubformDownloadUrl(recordId, subRowId, fieldName);
+        }
         return {
           ok: true,
           field: fieldName,
@@ -535,11 +706,25 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token) {
     return { attempted: false, ok: true, rows: [] };
   }
 
-  const field = fileUploadUrlField();
-  const rows = entries.map(([subRowId, urls]) => ({
-    ID: subRowId,
-    [field]: urls.filter(Boolean).join(","),
-  }));
+  const record = await getQuotationRecordById(recordId, token);
+  if (!record) {
+    return {
+      attempted: true,
+      ok: false,
+      error: "Could not read quotation record before File_Upload_URL patch.",
+      rows: [],
+    };
+  }
+
+  const rows = buildSubformRowsForFileUrlUpdate(record, rowUrlUpdates);
+  if (!rows.length) {
+    return {
+      attempted: true,
+      ok: false,
+      error: "No Quotation_Items rows found for File_Upload_URL patch.",
+      rows: [],
+    };
+  }
 
   const patchUrl =
     `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${QUOTATIONS_REPORT}/${recordId}`;
@@ -561,9 +746,14 @@ async function persistSubformFileUploadUrls(recordId, rowUrlUpdates, token) {
 
   if (!ok) {
     console.error("persistSubformFileUploadUrls failed:", patchData, rows);
+  } else {
+    console.log(
+      "persistSubformFileUploadUrls ok:",
+      rows.map((row) => ({ ID: row.ID, File_Upload_URL: row[fileUploadUrlField()] }))
+    );
   }
 
-  return { attempted: true, ok, patchData, rows };
+  return { attempted: true, ok, patchData, rows, rowUrlUpdates: entries };
 }
 
 /*
@@ -600,13 +790,13 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
     };
   }
 
-  const rowUrlUpdates = {};
+  const uploadResults = [];
 
   for (const idx of rowIndexes) {
     const rowFiles = filesByRow[idx] || {};
     const subRowId = subRowIds[idx];
     if (!subRowId) {
-      results.push({ ok: false, row: idx, error: "Missing subform row id" });
+      uploadResults.push({ ok: false, row: idx, error: "Missing subform row id" });
       continue;
     }
     for (const [kind, field] of [
@@ -617,37 +807,45 @@ async function uploadSubformFiles(recordId, createResponseData, filesByRow, toke
       if (!file) continue;
       try {
         const r = await uploadSubformFile(recordId, subRowId, field, file, token);
-        results.push({ ...r, row: idx });
-        if (r.ok && r.fileUrl) {
-          if (!rowUrlUpdates[subRowId]) rowUrlUpdates[subRowId] = [];
-          rowUrlUpdates[subRowId].push(r.fileUrl);
-        }
+        uploadResults.push({ ...r, row: idx, kind });
       } catch (e) {
         console.error(`Upload ${kind} row ${idx} threw:`, e);
-        results.push({ ok: false, row: idx, field, error: e.message });
+        uploadResults.push({ ok: false, row: idx, field, kind, error: e.message });
       }
     }
   }
 
+  const rowUrlUpdates = await collectUploadedFileUrls({
+    recordId,
+    subRowIds,
+    rowIndexes,
+    filesByRow,
+    uploadResults,
+    token,
+  });
+
   const fileUrlPatch = await persistSubformFileUploadUrls(recordId, rowUrlUpdates, token);
 
-  const allOk = results.every((r) => r.ok) && (!fileUrlPatch.attempted || fileUrlPatch.ok);
+  const allOk =
+    uploadResults.every((r) => r.ok || r.error === "Missing subform row id") &&
+    (!fileUrlPatch.attempted || fileUrlPatch.ok);
   return {
     attempted: true,
     subRowIds,
-    results,
+    results: uploadResults,
+    rowUrlUpdates,
     fileUrlPatch,
     allOk,
     error: allOk
       ? null
       : [
-          ...results
+          ...uploadResults
             .filter((r) => !r.ok)
             .map((r) =>
-              `row ${r.row ?? "?"} ${r.field || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
+              `row ${r.row ?? "?"} ${r.field || r.kind || ""}: ${describeUploadError(r.status, r.data, r.raw || r.error)}`
             ),
           fileUrlPatch.attempted && !fileUrlPatch.ok
-            ? `File_Upload_URL patch failed: ${formatCreatorError(fileUrlPatch.patchData)}`
+            ? `File_Upload_URL patch failed: ${fileUrlPatch.error || formatCreatorError(fileUrlPatch.patchData)}`
             : null,
         ]
           .filter(Boolean)
