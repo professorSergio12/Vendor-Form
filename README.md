@@ -25,6 +25,8 @@ npm run dev            # http://localhost:8787
 | `ZOHO_DC` | Your domain — `in` for zoho.in, `com` for zoho.com, etc. |
 | `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` | https://api-console.zoho.in → **Self Client** |
 | `ZOHO_REFRESH_TOKEN` | Generate a grant code (scopes `ZohoCreator.form.CREATE`, `ZohoCreator.report.UPDATE`) then exchange it once (see below) |
+| `CREATOR_QUOTATION_CONFIRM_PUBLIC_KEY` | Creator → Microservices → `Send_Quotation_Confirmation` → Summary → Public Key |
+| `CREATOR_DUE_DATE_PASSED_PUBLIC_KEY` | Creator → Microservices → `Send_Due_Date_Passed_Notice` → Summary → Public Key |
 | `CREATOR_ACCOUNT_OWNER` | The login name after `/appbuilder/` in your Creator app URL |
 | `CREATOR_APP_LINK_NAME` | Your app link name (e.g. `airatrex`) |
 | `ALLOWED_ORIGINS` | Your form's origin(s), comma-separated |
@@ -49,7 +51,13 @@ Copy `refresh_token` from the response into `.env` as `ZOHO_REFRESH_TOKEN`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET`  | `/health` | Liveness check |
+| `GET`  | `/api/rfq-deadline?rfq_no=&rfq_rid=` | Check if RFQ Due_Date allows submissions |
 | `POST` | `/api/quotations` | Accepts the flat quote payload, inserts into Creator |
+
+Submissions after the RFQ **Due_Date** (IST, end of that day) return HTTP **403**
+with `code: "DUE_DATE_PASSED"` — the record is not saved and an overdue notice
+email is sent (if Custom API is configured). Successful saves trigger a
+confirmation email to the vendor.
 
 The POST body is the flat object the React form sends (`rfqNumber`, `itemId`,
 `vendorId`, `product`, `quantity`, `price`, `currency`, `gst`, `freight`,
@@ -67,6 +75,20 @@ RFQ email updates):
 2. **Microservices → Custom API → Create** `Mark_Vendor_Quote_Received`
    - Method: POST | Auth: Public Key | Function: `markVendorQuoteReceived`
 3. Copy the public key → Render env `CREATOR_MARK_RECEIVED_PUBLIC_KEY`
+
+### Due date + vendor emails (Custom APIs)
+
+1. **RFQ email due date** — re-paste updated `DELUGE_sendRFQToVendors.dg` into
+   `sendRFQToVendors` (shows Due Date in email + `due_date` URL param).
+2. **Confirmation email** — paste `DELUGE_sendQuotationConfirmation.dg` → Function
+   `sendQuotationConfirmation` → Custom API `Send_Quotation_Confirmation` (Public Key)
+   → `CREATOR_QUOTATION_CONFIRM_PUBLIC_KEY`
+3. **Due date passed notice** — paste `DELUGE_sendDueDatePassedNotice.dg` → Function
+   `sendDueDatePassedNotice` → Custom API `Send_Due_Date_Passed_Notice` (Public Key)
+   → `CREATOR_DUE_DATE_PASSED_PUBLIC_KEY`
+
+Set `Due_Date` on each RFQ in Creator. Only submissions **after** that date are
+blocked; quotes submitted on or before the due date remain valid.
 
 ## Deploy
 

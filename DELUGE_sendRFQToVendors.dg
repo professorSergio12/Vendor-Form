@@ -99,6 +99,32 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: no items parsed - add rfqPayload (string) param to Custom API";
 	}
+	// Due date for vendor email + React form URL (ISO yyyy-MM-dd from widget payload, else RFQ.Due_Date)
+	dueDateIso = "";
+	dueDateDisplay = "";
+	if(rfqPayload != null && rfqPayload != "")
+	{
+		dueDateIso = ifnull(rfqPayload.getJSON("dueDate"),"");
+	}
+	if((dueDateIso == null || dueDateIso == "") && rfqRecordId != null && rfqRecordId != "")
+	{
+		try
+		{
+			rfqDueRec = RFQ[ID == rfqRecordId.toLong()];
+			if(rfqDueRec.count() > 0)
+			{
+				dueDateDisplay = ifnull(rfqDueRec.Due_Date,"") + "";
+				dueDateIso = dueDateDisplay;
+			}
+		}
+		catch (e)
+		{
+		}
+	}
+	if(dueDateDisplay == null || dueDateDisplay == "")
+	{
+		dueDateDisplay = dueDateIso;
+	}
 	// Quantity/unit fallback from RFQ_Products when widget payload is empty
 	qtyByProductId = Map();
 	unitByProductId = Map();
@@ -407,10 +433,15 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				unitsStr = unitsStr + "|";
 				descriptionsStr = descriptionsStr + "|";
 			}
-			itemIdsStr = itemIdsStr + itemId;
-			productNamesStr = productNamesStr + productName;
-			quantitiesStr = quantitiesStr + quantity;
-			unitsStr = unitsStr + unit;
+			itemId = (itemId + "").trim().replaceAll("|"," ");
+			productName = (productName + "").trim().replaceAll("|"," ");
+			quantity = (quantity + "").trim().replaceAll("|"," ");
+			unit = (unit + "").trim().replaceAll("|"," ");
+			description = (description + "").trim().replaceAll("|"," ");
+			itemIdsStr = itemIdsStr + encodeUrl(itemId);
+			productNamesStr = productNamesStr + encodeUrl(productName);
+			quantitiesStr = quantitiesStr + encodeUrl(quantity);
+			unitsStr = unitsStr + encodeUrl(unit);
 			descriptionsStr = descriptionsStr + encodeUrl(description);
 			qtyDisplay = quantity;
 			if(unit != null && unit != "")
@@ -428,18 +459,22 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		{
 			vendorUid = rfqNumber + "_" + vendorId;
 		}
-		urlParams = "?uid=" + vendorUid;
-		urlParams = urlParams + "&rfq_no=" + rfqNumber;
-		urlParams = urlParams + "&rfq_rid=" + rfqRecordId;
-		urlParams = urlParams + "&vendor_id=" + vendorId;
-		urlParams = urlParams + "&vendor_rid=" + vendorRecordId;
-		urlParams = urlParams + "&vendor_name=" + vendorName;
-		urlParams = urlParams + "&email=" + vendorEmail;
+		urlParams = "?uid=" + encodeUrl(vendorUid);
+		urlParams = urlParams + "&rfq_no=" + encodeUrl(rfqNumber);
+		urlParams = urlParams + "&rfq_rid=" + encodeUrl(rfqRecordId);
+		urlParams = urlParams + "&vendor_id=" + encodeUrl(vendorId);
+		urlParams = urlParams + "&vendor_rid=" + encodeUrl(vendorRecordId);
+		urlParams = urlParams + "&vendor_name=" + encodeUrl(vendorName);
+		urlParams = urlParams + "&email=" + encodeUrl(vendorEmail);
 		urlParams = urlParams + "&item_ids=" + itemIdsStr;
 		urlParams = urlParams + "&products=" + productNamesStr;
 		urlParams = urlParams + "&quantities=" + quantitiesStr;
 		urlParams = urlParams + "&units=" + unitsStr;
 		urlParams = urlParams + "&descriptions=" + descriptionsStr;
+		if(dueDateIso != null && dueDateIso != "")
+		{
+			urlParams = urlParams + "&due_date=" + encodeUrl(dueDateIso);
+		}
 		dynamicFormUrl = reactFormBaseUrl + urlParams;
 		itemCount = vendorItems.size();
 		subject = "Request for Quote: " + rfqNumber + " | " + itemCount + " Item(s)";
@@ -453,10 +488,21 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		emailBody = emailBody + "<div style='font-size:24px;font-weight:800;color:#ffffff;margin-top:6px;'>Request for Quotation</div>";
 		emailBody = emailBody + "<div style='font-size:13px;color:#e6efff;margin-top:8px;'>RFQ Reference: <strong style='color:#ffffff;'>" + rfqNumber + "</strong></div>";
 		emailBody = emailBody + "<div style='font-size:13px;color:#e6efff;margin-top:4px;'>Vendor: <strong style='color:#ffffff;'>" + displayVendorName + "</strong></div>";
+		if(dueDateDisplay != null && dueDateDisplay != "")
+		{
+			emailBody = emailBody + "<div style='font-size:13px;color:#e6efff;margin-top:4px;'>Submit by: <strong style='color:#ffffff;'>" + dueDateDisplay + "</strong></div>";
+		}
 		emailBody = emailBody + "</td></tr>";
 		emailBody = emailBody + "<tr><td style='padding:28px;'>";
 		emailBody = emailBody + "<p style='margin:0 0 14px;font-size:15px;color:#1f2733;'>Dear " + displayVendorName + ",</p>";
-		emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please review the item(s) below and submit your quote using the form link at the end of this email.</p>";
+		if(dueDateDisplay != null && dueDateDisplay != "")
+		{
+			emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please review the item(s) below and submit your quote <strong>on or before " + dueDateDisplay + "</strong> using the form link at the end of this email.</p>";
+		}
+		else
+		{
+			emailBody = emailBody + "<p style='margin:0 0 20px;font-size:14px;line-height:1.6;color:#5a6472;'>Please review the item(s) below and submit your quote using the form link at the end of this email.</p>";
+		}
 		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;border:1px solid #e9ecf1;border-radius:10px;overflow:hidden;'>";
 		emailBody = emailBody + "<tr style='background-color:#fafbfc;'>";
 		emailBody = emailBody + "<th align='left' style='padding:12px 16px;font-size:11px;font-weight:700;text-transform:uppercase;color:#000000;border-bottom:1px solid #e9ecf1;'>Product Name</th>";

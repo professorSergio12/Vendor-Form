@@ -14,6 +14,12 @@
  * Parent Quotation_Version: v0 first submit per RFQ+vendor, then v1, v2, …
  */
 import { getAccessToken } from "./zohoToken.js";
+import {
+  dueDateToIso,
+  formatDueDateDisplay,
+  isRfqDueDatePassed,
+  readRfqDueDate,
+} from "./rfqDeadline.js";
 import axios from "axios";
 import FormData from "form-data";
 
@@ -56,6 +62,14 @@ const CREATOR_WORKSPACE = process.env.CREATOR_WORKSPACE || "airatrex959";
 const MARK_RECEIVED_API =
   process.env.CREATOR_MARK_RECEIVED_API || "Mark_Vendor_Quote_Received";
 const MARK_RECEIVED_PUBLIC_KEY = process.env.CREATOR_MARK_RECEIVED_PUBLIC_KEY || "";
+const RFQ_DUE_DATE_FIELD = process.env.CREATOR_RFQ_DUE_DATE_FIELD || "Due_Date";
+const QUOTATION_CONFIRM_API =
+  process.env.CREATOR_QUOTATION_CONFIRM_API || "Send_Quotation_Confirmation";
+const QUOTATION_CONFIRM_PUBLIC_KEY =
+  process.env.CREATOR_QUOTATION_CONFIRM_PUBLIC_KEY || "";
+const DUE_DATE_PASSED_API =
+  process.env.CREATOR_DUE_DATE_PASSED_API || "Send_Due_Date_Passed_Notice";
+const DUE_DATE_PASSED_PUBLIC_KEY = process.env.CREATOR_DUE_DATE_PASSED_PUBLIC_KEY || "";
 const RFQ_PRODUCTS_SUBFORM = process.env.CREATOR_RFQ_PRODUCTS_SUBFORM || "RFQ_Products";
 
 // RFQ > Vendor_Selection subform — updated when vendor submits a quote.
@@ -1027,6 +1041,271 @@ export async function markVendorQuoteReceived({
   }
 
   return { attempted: true, ok: true, rowsUpdated, method: "rest", detail: patchData };
+}
+
+function parseDelugeCustomApiResponse(raw) {
+  const text =
+    typeof raw === "string"
+      ? raw
+      : raw?.result || raw?.message || raw?.description || JSON.stringify(raw || "");
+  const trimmed = String(text).trim();
+  const lowered = trimmed.toLowerCase();
+  const hasEmbeddedFailure =
+    lowered.includes("json_parse_error") ||
+    lowered.startsWith("error:") ||
+    /"code"\s*:\s*(2945|2930)/.test(trimmed);
+  const ok =
+    (lowered.startsWith("success:") ||
+      lowered.includes("email sent") ||
+      lowered.includes("success")) &&
+    !hasEmbeddedFailure;
+  return { ok, message: trimmed };
+}
+
+async function invokeCreatorCustomApi({ apiName, publicKey, payload, token }) {
+  if (!apiName) {
+    return { attempted: false, ok: false, reason: "missing api name" };
+  }
+
+  const baseUrl = `${API_HOST}/creator/custom/${CREATOR_WORKSPACE}/${apiName}`;
+  const attempts = [];
+  const envHint = `Set CREATOR_*_PUBLIC_KEY for ${apiName} in .env / Render (Creator → Microservices → ${apiName} → Public Key auth).`;
+
+  if (publicKey) {
+    const pkUrl = `${baseUrl}?publickey=${encodeURIComponent(publicKey)}`;
+    attempts.push({
+      label: "public_key_json",
+      url: pkUrl,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    attempts.push({
+      label: "public_key_form",
+      url: pkUrl,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(
+        Object.fromEntries(
+          Object.entries(payload).map(([k, v]) => [k, v == null ? "" : String(v)])
+        )
+      ).toString(),
+    });
+  }
+
+  if (token) {
+    attempts.push({
+      label: "oauth_json",
+      url: baseUrl,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Zoho-oauthtoken ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  if (!attempts.length) {
+    return {
+      attempted: false,
+      ok: false,
+      reason: `No public key or OAuth token available for Custom API ${apiName}. ${envHint}`,
+    };
+  }
+
+  let lastFailure = null;
+  for (const attempt of attempts) {
+    const res = await fetch(attempt.url, {
+      method: "POST",
+      headers: attempt.headers,
+      body: attempt.body,
+    });
+    const data = await res.json().catch(() => ({}));
+    const parsed = parseDelugeCustomApiResponse(data.result ?? data.message ?? data);
+
+    if (Number(data?.code) === 3000 && parsed.ok) {
+      return {
+        attempted: true,
+        ok: true,
+        method: `custom_api_${attempt.label}`,
+        message: parsed.message,
+        detail: data,
+      };
+    }
+
+    if (Number(data?.code) === 3000 && !parsed.message.toLowerCase().includes("error:")) {
+      return {
+        attempted: true,
+        ok: true,
+        method: `custom_api_${attempt.label}`,
+        message: parsed.message,
+        detail: data,
+      };
+    }
+
+    if (Number(data?.code) === 2945) {
+      lastFailure = {
+        attempted: true,
+        ok: false,
+        method: `custom_api_${attempt.label}`,
+        error:
+          attempt.label.startsWith("public_key")
+            ? `Custom API ${apiName} rejected the public key (2945). Re-copy the key from Creator → Microservices → ${apiName}.`
+            : `OAuth scope invalid (2945) for ${apiName}. Use Public Key auth in Creator and set the matching CREATOR_*_PUBLIC_KEY. ${envHint}`,
+        detail: data,
+      };
+      continue;
+    }
+
+    lastFailure = {
+      attempted: true,
+      ok: false,
+      method: `custom_api_${attempt.label}`,
+      error: parsed.message || formatCreatorError(data) || "Custom API call failed.",
+      detail: data,
+    };
+  }
+
+  if (!publicKey && lastFailure?.method === "custom_api_oauth_json") {
+    lastFailure.error = `${lastFailure.error} ${envHint}`;
+  }
+
+  return (
+    lastFailure || {
+      attempted: true,
+      ok: false,
+      error: `Custom API ${apiName} failed. ${envHint}`,
+    }
+  );
+}
+
+/**
+ * RFQ line items for vendor form — quantity/unit from RFQ_Products when URL params are missing.
+ */
+export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
+  const token = await getAccessToken();
+  const rfqId = await resolveRfqId({ rfqRecordId, rfqNumber }, token);
+  if (!rfqId) {
+    return { ok: false, items: [], reason: "rfq_not_found" };
+  }
+
+  const rfqRec = await fetchRfqRecord(rfqId, token);
+  if (!rfqRec) {
+    return { ok: false, items: [], reason: "rfq_not_found" };
+  }
+
+  const rows = rfqRec[RFQ_PRODUCTS_SUBFORM];
+  if (!Array.isArray(rows) || !rows.length) {
+    return {
+      ok: true,
+      items: [],
+      rfqNumber: rfqRec.RFQ_Number || rfqNumber,
+    };
+  }
+
+  const items = rows.map((row) => {
+    const productField = row.Product ?? row.Item_Master;
+    const itemMasterId = lookupId(productField);
+    const rowId = lookupId(row.ID ?? row.id);
+    const product = extractPlainValue(productField);
+    const qtyRaw = row.Quantity ?? row.quantity;
+    const quantity =
+      qtyRaw === null || qtyRaw === undefined || qtyRaw === ""
+        ? ""
+        : String(qtyRaw).trim();
+    const unit = extractPlainValue(row.Unit ?? row.unit);
+    return {
+      itemId: itemMasterId || rowId,
+      rowId,
+      product,
+      quantity,
+      unit,
+    };
+  });
+
+  return {
+    ok: true,
+    rfqNumber: rfqRec.RFQ_Number || rfqNumber,
+    items,
+  };
+}
+
+/**
+ * Check RFQ Due_Date before accepting a vendor submission.
+ * Only submissions after the due date (IST) are blocked.
+ */
+export async function validateRfqSubmissionDeadline({ rfqRecordId, rfqNumber }) {
+  const token = await getAccessToken();
+  const rfqId = await resolveRfqId({ rfqRecordId, rfqNumber }, token);
+  if (!rfqId) {
+    return { allowed: true, dueDate: null, dueDateIso: null, reason: "rfq_not_resolved" };
+  }
+
+  const rfqRec = await fetchRfqRecord(rfqId, token);
+  if (!rfqRec) {
+    return { allowed: true, dueDate: null, dueDateIso: null, reason: "rfq_not_found" };
+  }
+
+  const dueDate = readRfqDueDate(rfqRec, RFQ_DUE_DATE_FIELD);
+  if (!dueDate) {
+    return {
+      allowed: true,
+      dueDate: null,
+      dueDateIso: null,
+      rfqId,
+      rfqNumber: rfqRec.RFQ_Number || rfqNumber,
+    };
+  }
+
+  const passed = isRfqDueDatePassed(dueDate);
+  return {
+    allowed: !passed,
+    dueDate,
+    dueDateIso: dueDateToIso(dueDate),
+    dueDateDisplay: formatDueDateDisplay(dueDate),
+    rfqId,
+    rfqNumber: rfqRec.RFQ_Number || rfqNumber,
+    passed,
+  };
+}
+
+export async function sendDueDatePassedNoticeEmail(payload) {
+  const token = await getAccessToken();
+  const email = String(payload.contactEmail || "").trim();
+  if (!email) {
+    return { attempted: false, ok: false, reason: "missing vendor email" };
+  }
+
+  return invokeCreatorCustomApi({
+    apiName: DUE_DATE_PASSED_API,
+    publicKey: DUE_DATE_PASSED_PUBLIC_KEY,
+    token,
+    payload: {
+      vendorEmail: email,
+      vendorName: String(payload.vendorName || "").trim(),
+      rfqNumber: String(payload.rfqNumber || "").trim(),
+      dueDate: String(payload.dueDateDisplay || payload.dueDate || "").trim(),
+    },
+  });
+}
+
+export async function sendQuotationConfirmationEmail(payload) {
+  const token = await getAccessToken();
+  const email = String(payload.contactEmail || "").trim();
+  if (!email) {
+    return { attempted: false, ok: false, reason: "missing vendor email" };
+  }
+
+  return invokeCreatorCustomApi({
+    apiName: QUOTATION_CONFIRM_API,
+    publicKey: QUOTATION_CONFIRM_PUBLIC_KEY,
+    token,
+    payload: {
+      vendorEmail: email,
+      vendorName: String(payload.vendorName || "").trim(),
+      rfqNumber: String(payload.rfqNumber || "").trim(),
+      quotationVersion: String(payload.quotationVersion || "").trim(),
+      submissionDate: formatSubmissionDate(),
+    },
+  });
 }
 
 export async function createQuotationRecord(flatPayload, files = {}) {
