@@ -4,9 +4,9 @@
 //
 // Custom API arguments (map in Creator Microservices):
 //   vendorEmail, vendorName, rfqNumber, quotationVersion, submissionDate,
-//   itemsJson, currency, grandTotal
+//   itemsJson, products, quantities, unitPrices, totalAmounts, currency, grandTotal
 
-string sendQuotationConfirmation(string vendorEmail, string vendorName, string rfqNumber, string quotationVersion, string submissionDate, string itemsJson, string currency, string grandTotal)
+string sendQuotationConfirmation(string vendorEmail, string vendorName, string rfqNumber, string quotationVersion, string submissionDate, string itemsJson, string products, string quantities, string unitPrices, string totalAmounts, string currency, string grandTotal)
 {
 	if(vendorEmail == null || vendorEmail == "" || !vendorEmail.contains("@"))
 	{
@@ -31,8 +31,71 @@ string sendQuotationConfirmation(string vendorEmail, string vendorName, string r
 	}
 	grandTotalLabel = ifnull(grandTotal,"");
 	tableRows = "";
+	productsText = ifnull(products,"");
+	if(productsText != null && productsText != "")
+	{
+		productList = productsText.toList("|");
+		qtyList = ifnull(quantities,"").toList("|");
+		priceList = ifnull(unitPrices,"").toList("|");
+		totalList = ifnull(totalAmounts,"").toList("|");
+		lineIndex = 0;
+		for each  productName in productList
+		{
+			productName = (productName + "").trim();
+			quantityLabel = "-";
+			unitPriceLabel = "-";
+			totalLabel = "-";
+			if(qtyList.size() > lineIndex)
+			{
+				quantityLabel = (qtyList.get(lineIndex) + "").trim();
+			}
+			if(priceList.size() > lineIndex)
+			{
+				unitPriceLabel = (priceList.get(lineIndex) + "").trim();
+			}
+			if(totalList.size() > lineIndex)
+			{
+				totalLabel = (totalList.get(lineIndex) + "").trim();
+			}
+			if(productName == null || productName == "")
+			{
+				productName = "-";
+			}
+			if(quantityLabel == null || quantityLabel == "")
+			{
+				quantityLabel = "-";
+			}
+			if(unitPriceLabel == null || unitPriceLabel == "")
+			{
+				unitPriceLabel = "-";
+			}
+			else if(unitPriceLabel != "-" && !unitPriceLabel.contains(currencyLabel))
+			{
+				unitPriceLabel = currencyLabel + " " + unitPriceLabel;
+			}
+			if(totalLabel == null || totalLabel == "")
+			{
+				totalLabel = "-";
+			}
+			else if(totalLabel != "-" && !totalLabel.contains(currencyLabel))
+			{
+				totalLabel = currencyLabel + " " + totalLabel;
+			}
+			productName = productName.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			quantityLabel = quantityLabel.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			unitPriceLabel = unitPriceLabel.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			totalLabel = totalLabel.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			tableRows = tableRows + "<tr>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:600;vertical-align:top;'>" + productName + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:center;vertical-align:top;white-space:nowrap;'>" + quantityLabel + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:right;vertical-align:top;white-space:nowrap;'>" + unitPriceLabel + "</td>";
+			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:700;text-align:right;vertical-align:top;white-space:nowrap;'>" + totalLabel + "</td>";
+			tableRows = tableRows + "</tr>";
+			lineIndex = lineIndex + 1;
+		}
+	}
 	itemsText = ifnull(itemsJson,"");
-	if(itemsText != null && itemsText != "")
+	if((tableRows == null || tableRows == "") && itemsText != null && itemsText != "")
 	{
 		itemsText = itemsText.trim();
 		if(itemsText.subString(0,1) != "[")
@@ -42,10 +105,27 @@ string sendQuotationConfirmation(string vendorEmail, string vendorName, string r
 		itemRows = itemsText.toJSONList();
 		for each  row in itemRows
 		{
-			productName = (ifnull(row.get("product"),"") + "").trim();
-			quantityLabel = (ifnull(row.get("quantity"),"") + "").trim();
-			unitPriceLabel = (ifnull(row.get("unitPrice"),"") + "").trim();
-			totalLabel = (ifnull(row.get("totalAmount"),"") + "").trim();
+			productName = ifnull(row.get("product"),ifnull(row.getJSON("product"),""));
+			quantityLabel = ifnull(row.get("quantity"),ifnull(row.getJSON("quantity"),""));
+			unitPriceLabel = ifnull(row.get("unitPrice"),ifnull(row.getJSON("unitPrice"),""));
+			totalLabel = ifnull(row.get("totalAmount"),ifnull(row.getJSON("totalAmount"),""));
+			if((productName == null || productName == "") && (quantityLabel == null || quantityLabel == "") && (unitPriceLabel == null || unitPriceLabel == "") && (totalLabel == null || totalLabel == ""))
+			{
+				rawRowText = ifnull(row + "","");
+				rawRowText = rawRowText.trim();
+				if(rawRowText != "" && rawRowText.subString(0,1) == "{")
+				{
+					rowMap = rawRowText.toMap();
+					productName = ifnull(rowMap.get("product"),"");
+					quantityLabel = ifnull(rowMap.get("quantity"),"");
+					unitPriceLabel = ifnull(rowMap.get("unitPrice"),"");
+					totalLabel = ifnull(rowMap.get("totalAmount"),"");
+				}
+			}
+			productName = (productName + "").trim();
+			quantityLabel = (quantityLabel + "").trim();
+			unitPriceLabel = (unitPriceLabel + "").trim();
+			totalLabel = (totalLabel + "").trim();
 			if(productName == null || productName == "")
 			{
 				productName = "-";

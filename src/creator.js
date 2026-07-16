@@ -1290,18 +1290,33 @@ export async function sendDueDatePassedNoticeEmail(payload) {
 /* Build line-item summary for the vendor confirmation email Custom API. */
 function buildConfirmationEmailItemFields(items, currency = "INR") {
   const currencyLabel = String(currency || "INR").trim();
+  const sanitize = (value) => String(value ?? "").trim().replace(/\|/g, " ");
+  const products = [];
+  const quantities = [];
+  const unitPrices = [];
+  const totalAmounts = [];
   const lines = (Array.isArray(items) ? items : []).map((line) => {
     const qty = line.quantity != null && line.quantity !== "" ? String(line.quantity) : "";
     const unit = line.unit ? String(line.unit).trim() : "";
     const quantityLabel = qty ? `${qty}${unit ? ` ${unit}` : ""}` : "—";
     const unitPrice = Number(line.price ?? line.unitPrice);
     const total = Number(line.totalAmount);
+    const product = String(line.product || "—").trim();
+    const unitPriceLabel =
+      Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice.toFixed(2) : "—";
+    const totalLabel =
+      Number.isFinite(total) && total > 0 ? total.toFixed(2) : "—";
+
+    products.push(sanitize(product));
+    quantities.push(sanitize(quantityLabel));
+    unitPrices.push(sanitize(unitPriceLabel));
+    totalAmounts.push(sanitize(totalLabel));
+
     return {
-      product: String(line.product || "—").trim(),
+      product,
       quantity: quantityLabel,
-      unitPrice:
-        Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice.toFixed(2) : "—",
-      totalAmount: Number.isFinite(total) && total > 0 ? total.toFixed(2) : "—",
+      unitPrice: unitPriceLabel,
+      totalAmount: totalLabel,
     };
   });
 
@@ -1313,6 +1328,10 @@ function buildConfirmationEmailItemFields(items, currency = "INR") {
 
   return {
     itemsJson: JSON.stringify(lines),
+    products: products.join("|"),
+    quantities: quantities.join("|"),
+    unitPrices: unitPrices.join("|"),
+    totalAmounts: totalAmounts.join("|"),
     currency: currencyLabel,
     grandTotal: grandTotal > 0 ? grandTotal.toFixed(2) : "",
   };
@@ -1341,6 +1360,10 @@ export async function sendQuotationConfirmationEmail(payload) {
       quotationVersion: String(payload.quotationVersion || "").trim(),
       submissionDate: formatSubmissionDate(),
       itemsJson: itemFields.itemsJson,
+      products: itemFields.products,
+      quantities: itemFields.quantities,
+      unitPrices: itemFields.unitPrices,
+      totalAmounts: itemFields.totalAmounts,
       currency: itemFields.currency,
       grandTotal: itemFields.grandTotal,
     },
