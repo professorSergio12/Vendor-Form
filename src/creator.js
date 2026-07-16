@@ -1287,12 +1287,48 @@ export async function sendDueDatePassedNoticeEmail(payload) {
   });
 }
 
+/* Build line-item summary for the vendor confirmation email Custom API. */
+function buildConfirmationEmailItemFields(items, currency = "INR") {
+  const currencyLabel = String(currency || "INR").trim();
+  const lines = (Array.isArray(items) ? items : []).map((line) => {
+    const qty = line.quantity != null && line.quantity !== "" ? String(line.quantity) : "";
+    const unit = line.unit ? String(line.unit).trim() : "";
+    const quantityLabel = qty ? `${qty}${unit ? ` ${unit}` : ""}` : "—";
+    const unitPrice = Number(line.price ?? line.unitPrice);
+    const total = Number(line.totalAmount);
+    return {
+      product: String(line.product || "—").trim(),
+      quantity: quantityLabel,
+      unitPrice:
+        Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice.toFixed(2) : "—",
+      totalAmount: Number.isFinite(total) && total > 0 ? total.toFixed(2) : "—",
+    };
+  });
+
+  let grandTotal = 0;
+  for (const line of Array.isArray(items) ? items : []) {
+    const total = Number(line.totalAmount);
+    if (Number.isFinite(total)) grandTotal += total;
+  }
+
+  return {
+    itemsJson: JSON.stringify(lines),
+    currency: currencyLabel,
+    grandTotal: grandTotal > 0 ? grandTotal.toFixed(2) : "",
+  };
+}
+
 export async function sendQuotationConfirmationEmail(payload) {
   const token = await getAccessToken();
   const email = String(payload.contactEmail || "").trim();
   if (!email) {
     return { attempted: false, ok: false, reason: "missing vendor email" };
   }
+
+  const itemFields = buildConfirmationEmailItemFields(
+    payload.items,
+    payload.currency
+  );
 
   return invokeCreatorCustomApi({
     apiName: QUOTATION_CONFIRM_API,
@@ -1304,6 +1340,9 @@ export async function sendQuotationConfirmationEmail(payload) {
       rfqNumber: String(payload.rfqNumber || "").trim(),
       quotationVersion: String(payload.quotationVersion || "").trim(),
       submissionDate: formatSubmissionDate(),
+      itemsJson: itemFields.itemsJson,
+      currency: itemFields.currency,
+      grandTotal: itemFields.grandTotal,
     },
   });
 }

@@ -166,6 +166,18 @@ app.post("/api/quotations", upload.any(), async (req, res) => {
           vendorName: p.vendorName,
           rfqNumber: p.rfqNumber,
           quotationVersion: result.quotationVersion,
+          currency: p.currency,
+          items:
+            items.length > 0
+              ? items
+              : [
+                  {
+                    product: p.product,
+                    quantity: p.quantity,
+                    unit: p.unit,
+                    totalAmount: p.totalAmount || p.price,
+                  },
+                ],
         });
       } catch (emailErr) {
         confirmationEmail = { attempted: true, ok: false, error: emailErr.message };

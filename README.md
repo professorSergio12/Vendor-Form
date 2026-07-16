@@ -82,6 +82,8 @@ RFQ email updates):
    `sendRFQToVendors` (shows Due Date in email + `due_date` URL param).
 2. **Confirmation email** — paste `DELUGE_sendQuotationConfirmation.dg` → Function
    `sendQuotationConfirmation` → Custom API `Send_Quotation_Confirmation` (Public Key)
+   → map arguments: `vendorEmail`, `vendorName`, `rfqNumber`, `quotationVersion`,
+   `submissionDate`, `itemsJson`, `currency`, `grandTotal`
    → `CREATOR_QUOTATION_CONFIRM_PUBLIC_KEY`
 3. **Due date passed notice** — paste `DELUGE_sendDueDatePassedNotice.dg` → Function
    `sendDueDatePassedNotice` → Custom API `Send_Due_Date_Passed_Notice` (Public Key)
