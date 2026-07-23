@@ -1,17 +1,16 @@
 /*
- * Vendor_Quotations — Creator link names (confirmed):
- *
  * Parent: RFQ, Vendor_Master, Submission_Date, Margin,
  *         Total_Amount (grand total), Delivery_Date, Currency
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
- *         Total_Amount (line), Delivery_Date, Currency, Item_Master, Status (per line)
+ *         Total_Amount (line), Delivery_Date, Currency, Item_Master, Actual_Product_Name,
+ *         Status (per line)
  *
- * Parent file uploads (multi): Attachment, DataSheet — uploaded after record create via v2.1 Upload File API.
+ * Item_Master is always resolved (keeps quote matched to RFQ line).
+ * If vendor edits the product name: Actual_Product_Name is also set.
+ * If vendor keeps the original name: Actual_Product_Name stays empty.
  *
- * RFQ form RFQ_Products subform (qty source for vendor email): Product, Quantity (DECIMAL), Unit
- *
- * Parent Quotation_Version: v0 first submit per RFQ+vendor, then v1, v2, …
+ * Spec_1 … Spec_4: single-line text from the vendor form (prefilled or edited).
  */
 import { getAccessToken } from "./zohoToken.js";
 import {
@@ -38,13 +37,15 @@ const quotationVersionField = () =>
   process.env.CREATOR_QUOTATION_VERSION_FIELD || "Quotation_Version";
 const availableQuantityField = () =>
   process.env.CREATOR_AVAILABLE_QUANTITY_FIELD || "Available_Quantity";
+const actualProductNameField = () =>
+  process.env.CREATOR_ACTUAL_PRODUCT_NAME_FIELD || "Actual_Product_Name";
 
 const QUOTATIONS_REPORT =
   process.env.CREATOR_QUOTATIONS_REPORT || "Vendor_Quotations_Report";
 
 // Parent multi file-upload fields on Vendor_Quotations (not in subform).
 const ATTACHMENT_FIELD = process.env.CREATOR_ATTACHMENT_FIELD || "Attachment";
-const DATASHEET_FIELD = process.env.CREATOR_DATASHEET_FIELD || "DataSheet";
+const DATASHEET_FIELD = process.env.CREATOR_DATASHEET_FIELD || "Datasheet";
 
 // Reports + match fields used to resolve the lookups.
 const VENDOR_REPORT = process.env.CREATOR_VENDOR_REPORT || "Vendor_Master_Report";
@@ -312,6 +313,7 @@ export function buildSubformRow(p) {
   const lineSubtotal = unitPrice * qty;
   const gstAmount = Math.round(((lineSubtotal * gstPct) / 100) * 100) / 100;
   const lineTotal = Math.round((lineSubtotal + gstAmount) * 100) / 100;
+  const productEdited = isProductEdited(p);
 
   const row = {
     Quantity: qty,
@@ -334,8 +336,28 @@ export function buildSubformRow(p) {
     row.Delivery_Date = `${deliveryFormatted} 00:00:00`;
   }
 
+  // Always keep Item_Master so the quote stays matched to the RFQ line item.
+  // When vendor edits the display name, also store it in Actual_Product_Name.
   if (p.itemMasterId) {
     row.Item_Master = p.itemMasterId;
+  }
+  if (productEdited) {
+    const actualName = String(p.actualProductName || p.product || "").trim();
+    if (actualName) {
+      row[actualProductNameField()] = actualName;
+    }
+  }
+
+  for (const [key, field] of [
+    ["mainCategory", "Main_Category"],
+    ["productType", "Product_Type"],
+    ["spec1", "Spec_1"],
+    ["spec2", "Spec_2"],
+    ["spec3", "Spec_3"],
+    ["spec4", "Spec_4"],
+  ]) {
+    const value = String(p[key] ?? "").trim();
+    if (value) row[field] = value;
   }
 
   const availQty = num(p.availableQuantity, NaN);
@@ -344,6 +366,19 @@ export function buildSubformRow(p) {
   }
 
   return { row, lineSubtotal, gstAmount, lineTotal };
+}
+
+function isProductEdited(p) {
+  if (p.productEdited === true || p.productEdited === "true" || p.productEdited === 1 || p.productEdited === "1") {
+    return true;
+  }
+  if (p.productEdited === false || p.productEdited === "false" || p.productEdited === 0 || p.productEdited === "0") {
+    return false;
+  }
+  const current = String(p.actualProductName || p.product || "").trim().toLowerCase();
+  const original = String(p.originalProduct || "").trim().toLowerCase();
+  if (!original) return Boolean(current && p.actualProductName);
+  return Boolean(current && current !== original);
 }
 
 
@@ -829,8 +864,10 @@ function collectSubmittedItemIds(linePayloads, resolvedItemMasters) {
 function collectSubmittedProductNames(linePayloads) {
   const names = new Set();
   (linePayloads || []).forEach((line) => {
-    const name = String(line.product || "").trim().toLowerCase();
-    if (name) names.add(name);
+    for (const candidate of [line.product, line.originalProduct]) {
+      const name = String(candidate || "").trim().toLowerCase();
+      if (name) names.add(name);
+    }
   });
   return names;
 }
@@ -1212,14 +1249,82 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
         ? ""
         : String(qtyRaw).trim();
     const unit = extractPlainValue(row.Unit ?? row.unit);
+    const productObj =
+      productField && typeof productField === "object" ? productField : null;
+    const pickSpec = (...candidates) => {
+      for (const c of candidates) {
+        const v = extractPlainValue(c);
+        if (v) return v;
+      }
+      return "";
+    };
     return {
       itemId: itemMasterId || rowId,
       rowId,
       product,
       quantity,
       unit,
+      description: extractPlainValue(row.Description ?? row.description),
+      mainCategory: pickSpec(
+        row.Main_Category,
+        row.mainCategory,
+        productObj?.Main_Category,
+        productObj?.mainCategory
+      ),
+      productType: pickSpec(
+        row.Product_Type,
+        row.productType,
+        productObj?.Product_Type,
+        productObj?.productType
+      ),
+      spec1: pickSpec(row.Spec_1, row.spec1, productObj?.Spec_1, productObj?.spec1),
+      spec2: pickSpec(row.Spec_2, row.spec2, productObj?.Spec_2, productObj?.spec2),
+      spec3: pickSpec(row.Spec_3, row.spec3, productObj?.Spec_3, productObj?.spec3),
+      spec4: pickSpec(row.Spec_4, row.spec4, productObj?.Spec_4, productObj?.spec4),
     };
   });
+
+  // If RFQ_Products lacks catalog fields, fall back to Item Master (Items report).
+  const needsItemCatalog = items.some(
+    (it) =>
+      it.itemId &&
+      ((!it.spec1 && !it.spec2 && !it.spec3 && !it.spec4) ||
+        !it.mainCategory ||
+        !it.productType)
+  );
+  if (needsItemCatalog) {
+    for (const it of items) {
+      if (!it.itemId || !isRecordId(it.itemId)) continue;
+      const needsSpecs = !it.spec1 && !it.spec2 && !it.spec3 && !it.spec4;
+      const needsCat = !it.mainCategory || !it.productType;
+      if (!needsSpecs && !needsCat) continue;
+      try {
+        const url =
+          `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${ITEM_MASTER_REPORT}` +
+          `/${it.itemId}?field_config=all`;
+        const res = await fetch(url, {
+          headers: { Authorization: `Zoho-oauthtoken ${token}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        const rec = Array.isArray(data.data) ? data.data[0] : data.data;
+        if (data.code !== 3000 || !rec) continue;
+        if (needsSpecs) {
+          it.spec1 = extractPlainValue(rec.Spec_1 ?? rec.spec1);
+          it.spec2 = extractPlainValue(rec.Spec_2 ?? rec.spec2);
+          it.spec3 = extractPlainValue(rec.Spec_3 ?? rec.spec3);
+          it.spec4 = extractPlainValue(rec.Spec_4 ?? rec.spec4);
+        }
+        if (!it.mainCategory) {
+          it.mainCategory = extractPlainValue(rec.Main_Category ?? rec.mainCategory);
+        }
+        if (!it.productType) {
+          it.productType = extractPlainValue(rec.Product_Type ?? rec.productType);
+        }
+      } catch {
+        // ignore per-item lookup failures
+      }
+    }
+  }
 
   return {
     ok: true,
@@ -1391,11 +1496,20 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           itemId: line.itemId,
           itemMasterId: line.itemMasterId || line.itemId,
           product: line.product,
+          originalProduct: line.originalProduct,
+          productEdited: line.productEdited,
+          actualProductName: line.actualProductName,
           quantity: line.quantity,
           unit: line.unit,
           vendorRecordId: line.vendorRecordId || flatPayload.vendorRecordId,
           vendorId: line.vendorId || flatPayload.vendorId,
           description: line.description,
+          mainCategory: line.mainCategory,
+          productType: line.productType,
+          spec1: line.spec1,
+          spec2: line.spec2,
+          spec3: line.spec3,
+          spec4: line.spec4,
           deliveryDate: line.deliveryDate,
           totalAmount: line.totalAmount,
           price: line.price,
@@ -1419,9 +1533,12 @@ export async function createQuotationRecord(flatPayload, files = {}) {
 
   for (let i = 0; i < linePayloads.length; i += 1) {
     const line = linePayloads[i];
+    const productEdited = isProductEdited(line);
+    // Always resolve Item_Master. Use original product name for lookup when edited.
     const itemMasterId = await resolveItemMasterId(
       {
         ...line,
+        product: line.originalProduct || line.product,
         rfqRecordId: flatPayload.rfqRecordId,
       },
       token
@@ -1429,6 +1546,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
     resolvedItemMasters.push(itemMasterId);
     const built = buildSubformRow({
       ...line,
+      productEdited,
       itemMasterId,
     });
     subformRows.push(built.row);
@@ -1465,7 +1583,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   const created = Array.isArray(respData.data) ? respData.data[0] : respData.data;
   const recordId = created?.ID;
 
-  // Step 2: upload files to parent Attachment / DataSheet fields
+  // Step 2: upload files to parent Attachment / Datasheet fields
   let uploads = { attempted: false, results: [] };
   if (ok && recordId) {
     uploads = await uploadQuotationParentFiles(recordId, files, token);

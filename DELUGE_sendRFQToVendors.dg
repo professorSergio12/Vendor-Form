@@ -51,6 +51,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					itemMap.put("vendorRecordId",ifnull(rawItem.get("vendorRecordId"),ifnull(rawItem.getJSON("vendorRecordId"),"")));
 					itemMap.put("vendorEmail",ifnull(rawItem.get("vendorEmail"),ifnull(rawItem.getJSON("vendorEmail"),"")));
 					itemMap.put("description",ifnull(rawItem.get("description"),ifnull(rawItem.getJSON("description"),"")));
+					itemMap.put("spec1",ifnull(rawItem.get("spec1"),ifnull(rawItem.getJSON("spec1"),ifnull(rawItem.get("Spec_1"),ifnull(rawItem.getJSON("Spec_1"),"")))));
+					itemMap.put("spec2",ifnull(rawItem.get("spec2"),ifnull(rawItem.getJSON("spec2"),ifnull(rawItem.get("Spec_2"),ifnull(rawItem.getJSON("Spec_2"),"")))));
+					itemMap.put("spec3",ifnull(rawItem.get("spec3"),ifnull(rawItem.getJSON("spec3"),ifnull(rawItem.get("Spec_3"),ifnull(rawItem.getJSON("Spec_3"),"")))));
+					itemMap.put("spec4",ifnull(rawItem.get("spec4"),ifnull(rawItem.getJSON("spec4"),ifnull(rawItem.get("Spec_4"),ifnull(rawItem.getJSON("Spec_4"),"")))));
+					itemMap.put("mainCategory",ifnull(rawItem.get("mainCategory"),ifnull(rawItem.getJSON("mainCategory"),ifnull(rawItem.get("Main_Category"),ifnull(rawItem.getJSON("Main_Category"),"")))));
+					itemMap.put("productType",ifnull(rawItem.get("productType"),ifnull(rawItem.getJSON("productType"),ifnull(rawItem.get("Product_Type"),ifnull(rawItem.getJSON("Product_Type"),"")))));
 					normalizedItems.add(itemMap);
 				}
 			}
@@ -73,6 +79,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				itemMap.put("vendorRecordId",ifnull(rawItem.get("vendorRecordId"),""));
 				itemMap.put("vendorEmail",ifnull(rawItem.get("vendorEmail"),""));
 				itemMap.put("description",ifnull(rawItem.get("description"),""));
+				itemMap.put("spec1",ifnull(rawItem.get("spec1"),ifnull(rawItem.get("Spec_1"),"")));
+				itemMap.put("spec2",ifnull(rawItem.get("spec2"),ifnull(rawItem.get("Spec_2"),"")));
+				itemMap.put("spec3",ifnull(rawItem.get("spec3"),ifnull(rawItem.get("Spec_3"),"")));
+				itemMap.put("spec4",ifnull(rawItem.get("spec4"),ifnull(rawItem.get("Spec_4"),"")));
+				itemMap.put("mainCategory",ifnull(rawItem.get("mainCategory"),ifnull(rawItem.get("Main_Category"),"")));
+				itemMap.put("productType",ifnull(rawItem.get("productType"),ifnull(rawItem.get("Product_Type"),"")));
 				normalizedItems.add(itemMap);
 			}
 			else
@@ -90,6 +102,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					itemMap.put("vendorRecordId",ifnull(parsedMap.get("vendorRecordId"),""));
 					itemMap.put("vendorEmail",ifnull(parsedMap.get("vendorEmail"),""));
 					itemMap.put("description",ifnull(parsedMap.get("description"),""));
+					itemMap.put("spec1",ifnull(parsedMap.get("spec1"),ifnull(parsedMap.get("Spec_1"),"")));
+					itemMap.put("spec2",ifnull(parsedMap.get("spec2"),ifnull(parsedMap.get("Spec_2"),"")));
+					itemMap.put("spec3",ifnull(parsedMap.get("spec3"),ifnull(parsedMap.get("Spec_3"),"")));
+					itemMap.put("spec4",ifnull(parsedMap.get("spec4"),ifnull(parsedMap.get("Spec_4"),"")));
+					itemMap.put("mainCategory",ifnull(parsedMap.get("mainCategory"),ifnull(parsedMap.get("Main_Category"),"")));
+					itemMap.put("productType",ifnull(parsedMap.get("productType"),ifnull(parsedMap.get("Product_Type"),"")));
 					normalizedItems.add(itemMap);
 				}
 			}
@@ -130,6 +148,18 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	unitByProductId = Map();
 	qtyByRowId = Map();
 	unitByRowId = Map();
+	spec1ByProductId = Map();
+	spec2ByProductId = Map();
+	spec3ByProductId = Map();
+	spec4ByProductId = Map();
+	spec1ByRowId = Map();
+	spec2ByRowId = Map();
+	spec3ByRowId = Map();
+	spec4ByRowId = Map();
+	mainCategoryByProductId = Map();
+	productTypeByProductId = Map();
+	mainCategoryByRowId = Map();
+	productTypeByRowId = Map();
 	if(rfqRecordId != null && rfqRecordId != "")
 	{
 		try
@@ -154,15 +184,45 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					}
 					qtyVal = (ifnull(prodRow.Quantity,"") + "").trim();
 					unitVal = (ifnull(prodRow.Unit,"") + "").trim();
+					spec1Val = "";
+					spec2Val = "";
+					spec3Val = "";
+					spec4Val = "";
+					mainCategoryVal = "";
+					productTypeVal = "";
+					try
+					{
+						spec1Val = (ifnull(prodRow.Spec_1,"") + "").trim();
+						spec2Val = (ifnull(prodRow.Spec_2,"") + "").trim();
+						spec3Val = (ifnull(prodRow.Spec_3,"") + "").trim();
+						spec4Val = (ifnull(prodRow.Spec_4,"") + "").trim();
+						mainCategoryVal = (ifnull(prodRow.Main_Category,"") + "").trim();
+						productTypeVal = (ifnull(prodRow.Product_Type,"") + "").trim();
+					}
+					catch (e)
+					{
+					}
 					if(rowId != null && rowId != "")
 					{
 						qtyByRowId.put(rowId,qtyVal);
 						unitByRowId.put(rowId,unitVal);
+						spec1ByRowId.put(rowId,spec1Val);
+						spec2ByRowId.put(rowId,spec2Val);
+						spec3ByRowId.put(rowId,spec3Val);
+						spec4ByRowId.put(rowId,spec4Val);
+						mainCategoryByRowId.put(rowId,mainCategoryVal);
+						productTypeByRowId.put(rowId,productTypeVal);
 					}
 					if(productId != null && productId != "")
 					{
 						qtyByProductId.put(productId,qtyVal);
 						unitByProductId.put(productId,unitVal);
+						spec1ByProductId.put(productId,spec1Val);
+						spec2ByProductId.put(productId,spec2Val);
+						spec3ByProductId.put(productId,spec3Val);
+						spec4ByProductId.put(productId,spec4Val);
+						mainCategoryByProductId.put(productId,mainCategoryVal);
+						productTypeByProductId.put(productId,productTypeVal);
 					}
 				}
 			}
@@ -263,6 +323,66 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			newItem.put("vendorRecordId",resolvedVendorId);
 			newItem.put("vendorEmail",vendorEmail);
 			newItem.put("description",ifnull(item.get("description"),"").trim());
+			itemSpec1 = ifnull(item.get("spec1"),"");
+			itemSpec2 = ifnull(item.get("spec2"),"");
+			itemSpec3 = ifnull(item.get("spec3"),"");
+			itemSpec4 = ifnull(item.get("spec4"),"");
+			if((itemSpec1 == null || itemSpec1 == "") && itemIdKey != null && itemIdKey != "" && spec1ByRowId.containKey(itemIdKey))
+			{
+				itemSpec1 = spec1ByRowId.get(itemIdKey);
+			}
+			if((itemSpec1 == null || itemSpec1 == "") && itemIdKey != null && itemIdKey != "" && spec1ByProductId.containKey(itemIdKey))
+			{
+				itemSpec1 = spec1ByProductId.get(itemIdKey);
+			}
+			if((itemSpec2 == null || itemSpec2 == "") && itemIdKey != null && itemIdKey != "" && spec2ByRowId.containKey(itemIdKey))
+			{
+				itemSpec2 = spec2ByRowId.get(itemIdKey);
+			}
+			if((itemSpec2 == null || itemSpec2 == "") && itemIdKey != null && itemIdKey != "" && spec2ByProductId.containKey(itemIdKey))
+			{
+				itemSpec2 = spec2ByProductId.get(itemIdKey);
+			}
+			if((itemSpec3 == null || itemSpec3 == "") && itemIdKey != null && itemIdKey != "" && spec3ByRowId.containKey(itemIdKey))
+			{
+				itemSpec3 = spec3ByRowId.get(itemIdKey);
+			}
+			if((itemSpec3 == null || itemSpec3 == "") && itemIdKey != null && itemIdKey != "" && spec3ByProductId.containKey(itemIdKey))
+			{
+				itemSpec3 = spec3ByProductId.get(itemIdKey);
+			}
+			if((itemSpec4 == null || itemSpec4 == "") && itemIdKey != null && itemIdKey != "" && spec4ByRowId.containKey(itemIdKey))
+			{
+				itemSpec4 = spec4ByRowId.get(itemIdKey);
+			}
+			if((itemSpec4 == null || itemSpec4 == "") && itemIdKey != null && itemIdKey != "" && spec4ByProductId.containKey(itemIdKey))
+			{
+				itemSpec4 = spec4ByProductId.get(itemIdKey);
+			}
+			newItem.put("spec1",(itemSpec1 + "").trim());
+			newItem.put("spec2",(itemSpec2 + "").trim());
+			newItem.put("spec3",(itemSpec3 + "").trim());
+			newItem.put("spec4",(itemSpec4 + "").trim());
+			itemMainCategory = ifnull(item.get("mainCategory"),"");
+			itemProductType = ifnull(item.get("productType"),"");
+			if((itemMainCategory == null || itemMainCategory == "") && itemIdKey != null && itemIdKey != "" && mainCategoryByRowId.containKey(itemIdKey))
+			{
+				itemMainCategory = mainCategoryByRowId.get(itemIdKey);
+			}
+			if((itemMainCategory == null || itemMainCategory == "") && itemIdKey != null && itemIdKey != "" && mainCategoryByProductId.containKey(itemIdKey))
+			{
+				itemMainCategory = mainCategoryByProductId.get(itemIdKey);
+			}
+			if((itemProductType == null || itemProductType == "") && itemIdKey != null && itemIdKey != "" && productTypeByRowId.containKey(itemIdKey))
+			{
+				itemProductType = productTypeByRowId.get(itemIdKey);
+			}
+			if((itemProductType == null || itemProductType == "") && itemIdKey != null && itemIdKey != "" && productTypeByProductId.containKey(itemIdKey))
+			{
+				itemProductType = productTypeByProductId.get(itemIdKey);
+			}
+			newItem.put("mainCategory",(itemMainCategory + "").trim());
+			newItem.put("productType",(itemProductType + "").trim());
 			resolvedItems.add(newItem);
 		}
 	}
@@ -353,6 +473,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		quantitiesStr = "";
 		unitsStr = "";
 		descriptionsStr = "";
+		spec1sStr = "";
+		spec2sStr = "";
+		spec3sStr = "";
+		spec4sStr = "";
+		mainCategoriesStr = "";
+		productTypesStr = "";
 		tableRows = "";
 		emailedIds = List();
 		for each  item in vendorItems
@@ -409,6 +535,130 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					}
 				}
 			}
+			spec1 = (ifnull(item.get("spec1"),"") + "").trim();
+			spec2 = (ifnull(item.get("spec2"),"") + "").trim();
+			spec3 = (ifnull(item.get("spec3"),"") + "").trim();
+			spec4 = (ifnull(item.get("spec4"),"") + "").trim();
+			if(spec1 == null || spec1 == "")
+			{
+				if(itemId != null && itemId != "" && spec1ByProductId.containKey(itemId))
+				{
+					spec1 = (spec1ByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(spec1 == null || spec1 == "")
+			{
+				if(itemId != null && itemId != "" && spec1ByRowId.containKey(itemId))
+				{
+					spec1 = (spec1ByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(spec2 == null || spec2 == "")
+			{
+				if(itemId != null && itemId != "" && spec2ByProductId.containKey(itemId))
+				{
+					spec2 = (spec2ByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(spec2 == null || spec2 == "")
+			{
+				if(itemId != null && itemId != "" && spec2ByRowId.containKey(itemId))
+				{
+					spec2 = (spec2ByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(spec3 == null || spec3 == "")
+			{
+				if(itemId != null && itemId != "" && spec3ByProductId.containKey(itemId))
+				{
+					spec3 = (spec3ByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(spec3 == null || spec3 == "")
+			{
+				if(itemId != null && itemId != "" && spec3ByRowId.containKey(itemId))
+				{
+					spec3 = (spec3ByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(spec4 == null || spec4 == "")
+			{
+				if(itemId != null && itemId != "" && spec4ByProductId.containKey(itemId))
+				{
+					spec4 = (spec4ByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(spec4 == null || spec4 == "")
+			{
+				if(itemId != null && itemId != "" && spec4ByRowId.containKey(itemId))
+				{
+					spec4 = (spec4ByRowId.get(itemId) + "").trim();
+				}
+			}
+			mainCategory = (ifnull(item.get("mainCategory"),"") + "").trim();
+			productType = (ifnull(item.get("productType"),"") + "").trim();
+			if(mainCategory == null || mainCategory == "")
+			{
+				if(itemId != null && itemId != "" && mainCategoryByProductId.containKey(itemId))
+				{
+					mainCategory = (mainCategoryByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(mainCategory == null || mainCategory == "")
+			{
+				if(itemId != null && itemId != "" && mainCategoryByRowId.containKey(itemId))
+				{
+					mainCategory = (mainCategoryByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(productType == null || productType == "")
+			{
+				if(itemId != null && itemId != "" && productTypeByProductId.containKey(itemId))
+				{
+					productType = (productTypeByProductId.get(itemId) + "").trim();
+				}
+			}
+			if(productType == null || productType == "")
+			{
+				if(itemId != null && itemId != "" && productTypeByRowId.containKey(itemId))
+				{
+					productType = (productTypeByRowId.get(itemId) + "").trim();
+				}
+			}
+			if((spec1 == null || spec1 == "") && itemId != null && itemId != "")
+			{
+				try
+				{
+					imSpec = Items[ID == itemId.toLong()];
+					if(imSpec.count() > 0)
+					{
+						spec1 = (ifnull(imSpec.Spec_1,"") + "").trim();
+						if(spec2 == null || spec2 == "")
+						{
+							spec2 = (ifnull(imSpec.Spec_2,"") + "").trim();
+						}
+						if(spec3 == null || spec3 == "")
+						{
+							spec3 = (ifnull(imSpec.Spec_3,"") + "").trim();
+						}
+						if(spec4 == null || spec4 == "")
+						{
+							spec4 = (ifnull(imSpec.Spec_4,"") + "").trim();
+						}
+						if(mainCategory == null || mainCategory == "")
+						{
+							mainCategory = (ifnull(imSpec.Main_Category,"") + "").trim();
+						}
+						if(productType == null || productType == "")
+						{
+							productType = (ifnull(imSpec.Product_Type,"") + "").trim();
+						}
+					}
+				}
+				catch (e)
+				{
+				}
+			}
 			displayProductName = productName;
 			displayDescription = description;
 			if(displayProductName == null || displayProductName == "")
@@ -432,17 +682,35 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				quantitiesStr = quantitiesStr + "|";
 				unitsStr = unitsStr + "|";
 				descriptionsStr = descriptionsStr + "|";
+				spec1sStr = spec1sStr + "|";
+				spec2sStr = spec2sStr + "|";
+				spec3sStr = spec3sStr + "|";
+				spec4sStr = spec4sStr + "|";
+				mainCategoriesStr = mainCategoriesStr + "|";
+				productTypesStr = productTypesStr + "|";
 			}
 			itemId = (itemId + "").trim().replaceAll("|"," ");
 			productName = (productName + "").trim().replaceAll("|"," ");
 			quantity = (quantity + "").trim().replaceAll("|"," ");
 			unit = (unit + "").trim().replaceAll("|"," ");
 			description = (description + "").trim().replaceAll("|"," ");
+			spec1 = (spec1 + "").trim().replaceAll("|"," ");
+			spec2 = (spec2 + "").trim().replaceAll("|"," ");
+			spec3 = (spec3 + "").trim().replaceAll("|"," ");
+			spec4 = (spec4 + "").trim().replaceAll("|"," ");
+			mainCategory = (mainCategory + "").trim().replaceAll("|"," ");
+			productType = (productType + "").trim().replaceAll("|"," ");
 			itemIdsStr = itemIdsStr + encodeUrl(itemId);
 			productNamesStr = productNamesStr + encodeUrl(productName);
 			quantitiesStr = quantitiesStr + encodeUrl(quantity);
 			unitsStr = unitsStr + encodeUrl(unit);
 			descriptionsStr = descriptionsStr + encodeUrl(description);
+			spec1sStr = spec1sStr + encodeUrl(spec1);
+			spec2sStr = spec2sStr + encodeUrl(spec2);
+			spec3sStr = spec3sStr + encodeUrl(spec3);
+			spec4sStr = spec4sStr + encodeUrl(spec4);
+			mainCategoriesStr = mainCategoriesStr + encodeUrl(mainCategory);
+			productTypesStr = productTypesStr + encodeUrl(productType);
 			qtyDisplay = quantity;
 			if(unit != null && unit != "")
 			{
@@ -471,6 +739,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		urlParams = urlParams + "&quantities=" + quantitiesStr;
 		urlParams = urlParams + "&units=" + unitsStr;
 		urlParams = urlParams + "&descriptions=" + descriptionsStr;
+		urlParams = urlParams + "&spec_1s=" + spec1sStr;
+		urlParams = urlParams + "&spec_2s=" + spec2sStr;
+		urlParams = urlParams + "&spec_3s=" + spec3sStr;
+		urlParams = urlParams + "&spec_4s=" + spec4sStr;
+		urlParams = urlParams + "&main_categories=" + mainCategoriesStr;
+		urlParams = urlParams + "&product_types=" + productTypesStr;
 		if(dueDateIso != null && dueDateIso != "")
 		{
 			urlParams = urlParams + "&due_date=" + encodeUrl(dueDateIso);
