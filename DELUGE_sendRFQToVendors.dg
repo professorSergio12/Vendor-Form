@@ -712,10 +712,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			mainCategoriesStr = mainCategoriesStr + encodeUrl(mainCategory);
 			productTypesStr = productTypesStr + encodeUrl(productType);
 			qtyDisplay = quantity;
-			if(unit != null && unit != "")
-			{
-				qtyDisplay = quantity + " " + unit;
-			}
 			tableRows = tableRows + "<tr>";
 			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#1f2733;font-weight:600;vertical-align:top;'>" + displayProductName + "</td>";
 			tableRows = tableRows + "<td style='padding:14px 16px;border-bottom:1px solid #eef1f5;font-size:14px;color:#5a6472;text-align:center;vertical-align:top;white-space:nowrap;'>" + qtyDisplay + "</td>";
