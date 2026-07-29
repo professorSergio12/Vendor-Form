@@ -3,12 +3,10 @@
  *         Total_Amount (grand total), Delivery_Date, Currency
  *
  * Subform Quotation_Items: Description, Quantity, Available_Quantity, Unit_Price, GST (%),
- *         Total_Amount (line), Delivery_Date, Currency, Item_Master, Actual_Product_Name,
- *         Status (per line)
+ *         Total_Amount (line), Delivery_Date, Currency, Actual_Product_Name, Status (per line)
  *
- * Item_Master is always resolved (keeps quote matched to RFQ line).
- * If vendor edits the product name: Actual_Product_Name is also set.
- * If vendor keeps the original name: Actual_Product_Name stays empty.
+ * Item_Master lookup is intentionally left empty on submit.
+ * Actual_Product_Name is always set from the form product field value.
  *
  * Spec_1 … Spec_4: single-line text from the vendor form (prefilled or edited).
  */
@@ -313,7 +311,6 @@ export function buildSubformRow(p) {
   const lineSubtotal = unitPrice * qty;
   const gstAmount = Math.round(((lineSubtotal * gstPct) / 100) * 100) / 100;
   const lineTotal = Math.round((lineSubtotal + gstAmount) * 100) / 100;
-  const productEdited = isProductEdited(p);
 
   const row = {
     Quantity: qty,
@@ -336,16 +333,11 @@ export function buildSubformRow(p) {
     row.Delivery_Date = `${deliveryFormatted} 00:00:00`;
   }
 
-  // Always keep Item_Master so the quote stays matched to the RFQ line item.
-  // When vendor edits the display name, also store it in Actual_Product_Name.
-  if (p.itemMasterId) {
-    row.Item_Master = p.itemMasterId;
-  }
-  if (productEdited) {
-    const actualName = String(p.actualProductName || p.product || "").trim();
-    if (actualName) {
-      row[actualProductNameField()] = actualName;
-    }
+  // Do not set Item_Master (lookup) on Quotation_Items — leave it blank.
+  // Always map form product value → Actual_Product_Name.
+  const actualName = String(p.actualProductName || p.product || "").trim();
+  if (actualName) {
+    row[actualProductNameField()] = actualName;
   }
 
   for (const [key, field] of [
@@ -1242,13 +1234,6 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
     const productField = row.Product ?? row.Item_Master;
     const itemMasterId = lookupId(productField);
     const rowId = lookupId(row.ID ?? row.id);
-    const product = extractPlainValue(productField);
-    const qtyRaw = row.Quantity ?? row.quantity;
-    const quantity =
-      qtyRaw === null || qtyRaw === undefined || qtyRaw === ""
-        ? ""
-        : String(qtyRaw).trim();
-    const unit = extractPlainValue(row.Unit ?? row.unit);
     const productObj =
       productField && typeof productField === "object" ? productField : null;
     const pickSpec = (...candidates) => {
@@ -1258,6 +1243,30 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       }
       return "";
     };
+    const mainCategory = pickSpec(
+      row.Main_Category,
+      row.mainCategory,
+      productObj?.Main_Category,
+      productObj?.mainCategory
+    );
+    const productType = pickSpec(
+      row.Product_Type,
+      row.productType,
+      productObj?.Product_Type,
+      productObj?.productType
+    );
+    // Product lookup can be empty on RFQ_Products — fall back to Product_Type / display name.
+    const product =
+      extractPlainValue(productField) ||
+      productType ||
+      extractPlainValue(row.Product_Name ?? row.product_name) ||
+      "";
+    const qtyRaw = row.Quantity ?? row.quantity;
+    const quantity =
+      qtyRaw === null || qtyRaw === undefined || qtyRaw === ""
+        ? ""
+        : String(qtyRaw).trim();
+    const unit = extractPlainValue(row.Unit ?? row.unit);
     return {
       itemId: itemMasterId || rowId,
       rowId,
@@ -1265,18 +1274,8 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       quantity,
       unit,
       description: extractPlainValue(row.Description ?? row.description),
-      mainCategory: pickSpec(
-        row.Main_Category,
-        row.mainCategory,
-        productObj?.Main_Category,
-        productObj?.mainCategory
-      ),
-      productType: pickSpec(
-        row.Product_Type,
-        row.productType,
-        productObj?.Product_Type,
-        productObj?.productType
-      ),
+      mainCategory,
+      productType,
       spec1: pickSpec(row.Spec_1, row.spec1, productObj?.Spec_1, productObj?.spec1),
       spec2: pickSpec(row.Spec_2, row.spec2, productObj?.Spec_2, productObj?.spec2),
       spec3: pickSpec(row.Spec_3, row.spec3, productObj?.Spec_3, productObj?.spec3),
@@ -1534,20 +1533,12 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   for (let i = 0; i < linePayloads.length; i += 1) {
     const line = linePayloads[i];
     const productEdited = isProductEdited(line);
-    // Always resolve Item_Master. Use original product name for lookup when edited.
-    const itemMasterId = await resolveItemMasterId(
-      {
-        ...line,
-        product: line.originalProduct || line.product,
-        rfqRecordId: flatPayload.rfqRecordId,
-      },
-      token
-    );
-    resolvedItemMasters.push(itemMasterId);
+    // Keep payload item id for RFQ matching only — do not write Item_Master on subform.
+    resolvedItemMasters.push(line.itemMasterId || line.itemId || null);
     const built = buildSubformRow({
       ...line,
       productEdited,
-      itemMasterId,
+      itemMasterId: null,
     });
     subformRows.push(built.row);
   }
