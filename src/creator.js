@@ -343,6 +343,7 @@ export function buildSubformRow(p) {
   for (const [key, field] of [
     ["mainCategory", "Main_Category"],
     ["productType", "Product_Type"],
+    ["brand", "Brand"],
     ["spec1", "Spec_1"],
     ["spec2", "Spec_2"],
     ["spec3", "Spec_3"],
@@ -1255,6 +1256,12 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       productObj?.Product_Type,
       productObj?.productType
     );
+    const brand = pickSpec(
+      row.Brand,
+      row.brand,
+      productObj?.Brand,
+      productObj?.brand
+    );
     // Product lookup can be empty on RFQ_Products — fall back to Product_Type / display name.
     const product =
       extractPlainValue(productField) ||
@@ -1276,6 +1283,7 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       description: extractPlainValue(row.Description ?? row.description),
       mainCategory,
       productType,
+      brand,
       spec1: pickSpec(row.Spec_1, row.spec1, productObj?.Spec_1, productObj?.spec1),
       spec2: pickSpec(row.Spec_2, row.spec2, productObj?.Spec_2, productObj?.spec2),
       spec3: pickSpec(row.Spec_3, row.spec3, productObj?.Spec_3, productObj?.spec3),
@@ -1289,13 +1297,14 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       it.itemId &&
       ((!it.spec1 && !it.spec2 && !it.spec3 && !it.spec4) ||
         !it.mainCategory ||
-        !it.productType)
+        !it.productType ||
+        !it.brand)
   );
   if (needsItemCatalog) {
     for (const it of items) {
       if (!it.itemId || !isRecordId(it.itemId)) continue;
       const needsSpecs = !it.spec1 && !it.spec2 && !it.spec3 && !it.spec4;
-      const needsCat = !it.mainCategory || !it.productType;
+      const needsCat = !it.mainCategory || !it.productType || !it.brand;
       if (!needsSpecs && !needsCat) continue;
       try {
         const url =
@@ -1318,6 +1327,9 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
         }
         if (!it.productType) {
           it.productType = extractPlainValue(rec.Product_Type ?? rec.productType);
+        }
+        if (!it.brand) {
+          it.brand = extractPlainValue(rec.Brand ?? rec.brand);
         }
       } catch {
         // ignore per-item lookup failures
@@ -1505,6 +1517,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           description: line.description,
           mainCategory: line.mainCategory,
           productType: line.productType,
+          brand: line.brand,
           spec1: line.spec1,
           spec2: line.spec2,
           spec3: line.spec3,
