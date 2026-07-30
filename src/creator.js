@@ -306,7 +306,7 @@ async function resolveItemMasterId(p, token) {
 
 export function buildSubformRow(p) {
   const qty = num(p.quantity, 1);
-  const gstPct = num(p.gst, 18);
+  const gstPct = num(p.gst, 0);
   const unitPrice = num(p.price);
   const lineSubtotal = unitPrice * qty;
   const gstAmount = Math.round(((lineSubtotal * gstPct) / 100) * 100) / 100;
