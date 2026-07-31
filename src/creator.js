@@ -512,10 +512,87 @@ export function parseQuotationFiles(reqFiles = []) {
 function lookupId(val) {
   if (val == null || val === "") return "";
   if (typeof val === "object") {
-    const id = val.ID ?? val.id;
-    return id != null && id !== "" ? String(id) : "";
+    const id =
+      val.ID ??
+      val.id ??
+      val.zc_id ??
+      (typeof val.display_value === "object" ? val.display_value?.ID : null);
+    if (id != null && id !== "") return String(id);
+    // Sometimes Creator returns lookup as { display_value: "4608..." } with ID as string.
+    const display = val.display_value ?? val.zc_display_value;
+    if (display != null && isRecordId(String(display))) return String(display);
+    return "";
   }
-  return String(val);
+  const s = String(val).trim();
+  return s;
+}
+
+/** Read Items.Item_ID (AT23-01) from an Items report record. */
+function readItemCodeFromRecord(rec) {
+  if (!rec || typeof rec !== "object") return "";
+  return extractPlainValue(
+    rec.Item_Id ??
+      rec.Item_ID ??
+      rec.Item_Code ??
+      rec.Product_Code ??
+      rec.item_id ??
+      rec.ID1 ??
+      rec.Part_No ??
+      rec.SKU
+  );
+}
+
+async function fetchItemMasterRecord(itemMasterId, token) {
+  if (!itemMasterId || !isRecordId(itemMasterId)) return null;
+  try {
+    const url =
+      `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${ITEM_MASTER_REPORT}` +
+      `/${itemMasterId}?field_config=all`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    const rec = Array.isArray(data.data) ? data.data[0] : data.data;
+    if (data.code !== 3000 || !rec) return null;
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve Items master record ID + Item_ID code (AT23-01). */
+async function resolveItemsMasterAndCode({ productField, productName, productType, token }) {
+  let masterId = lookupId(productField);
+  if (masterId && isRecordId(masterId)) {
+    const rec = await fetchItemMasterRecord(masterId, token);
+    if (rec) {
+      return { masterId: String(masterId), itemCode: readItemCodeFromRecord(rec), rec };
+    }
+  }
+
+  const candidates = [
+    [ITEM_MASTER_NAME_FIELD, productName],
+    ["Type_field", productType],
+    ["Product_Type", productType],
+    ["Type_field", productName],
+    [ITEM_MASTER_NAME_FIELD, productType],
+    [ITEM_MASTER_CODE_FIELD, productName],
+  ];
+  for (const [field, value] of candidates) {
+    const v = String(value || "").trim();
+    if (!v) continue;
+    const resolved = await resolveRecordId(ITEM_MASTER_REPORT, field, v, token);
+    if (!resolved) continue;
+    const rec = await fetchItemMasterRecord(resolved, token);
+    if (rec) {
+      return {
+        masterId: String(resolved),
+        itemCode: readItemCodeFromRecord(rec),
+        rec,
+      };
+    }
+  }
+  return { masterId: masterId && isRecordId(masterId) ? String(masterId) : "", itemCode: "", rec: null };
 }
 
 function extractPlainValue(val) {
@@ -1231,9 +1308,9 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
     };
   }
 
-  const items = rows.map((row) => {
+  const items = [];
+  for (const row of rows) {
     const productField = row.Product ?? row.Item_Master;
-    const itemMasterId = lookupId(productField);
     const rowId = lookupId(row.ID ?? row.id);
     const productObj =
       productField && typeof productField === "object" ? productField : null;
@@ -1244,25 +1321,36 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       }
       return "";
     };
-    const mainCategory = pickSpec(
+    let mainCategory = pickSpec(
       row.Main_Category,
       row.mainCategory,
       productObj?.Main_Category,
       productObj?.mainCategory
     );
-    const productType = pickSpec(
+    let productType = pickSpec(
       row.Product_Type,
       row.productType,
       productObj?.Product_Type,
       productObj?.productType
     );
-    const brand = pickSpec(
+    let brand = pickSpec(
       row.Brand,
       row.brand,
       productObj?.Brand,
       productObj?.brand
     );
-    // Product lookup can be empty on RFQ_Products — fall back to Product_Type / display name.
+    let itemCode = pickSpec(
+      row.Item_Id,
+      row.Item_ID,
+      row.item_id,
+      row.Item_Code,
+      row.Product_Code,
+      productObj?.Item_ID,
+      productObj?.Item_Id,
+      productObj?.Item_Code,
+      productObj?.Product_Code,
+      productObj?.item_id
+    );
     const product =
       extractPlainValue(productField) ||
       productType ||
@@ -1274,8 +1362,41 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
         ? ""
         : String(qtyRaw).trim();
     const unit = extractPlainValue(row.Unit ?? row.unit);
-    return {
+    let spec1 = pickSpec(row.Spec_1, row.spec1, productObj?.Spec_1, productObj?.spec1);
+    let spec2 = pickSpec(row.Spec_2, row.spec2, productObj?.Spec_2, productObj?.spec2);
+    let spec3 = pickSpec(row.Spec_3, row.spec3, productObj?.Spec_3, productObj?.spec3);
+    let spec4 = pickSpec(row.Spec_4, row.spec4, productObj?.Spec_4, productObj?.spec4);
+
+    const resolved = await resolveItemsMasterAndCode({
+      productField,
+      productName: product,
+      productType,
+      token,
+    });
+    const itemMasterId = resolved.masterId || lookupId(productField);
+    if (!itemCode && resolved.itemCode) itemCode = resolved.itemCode;
+
+    const rec = resolved.rec;
+    if (rec) {
+      if (!mainCategory) {
+        mainCategory = extractPlainValue(rec.Main_Category ?? rec.mainCategory);
+      }
+      if (!productType) {
+        productType = extractPlainValue(
+          rec.Type_field ?? rec.Product_Type ?? rec.productType
+        );
+      }
+      if (!brand) brand = extractPlainValue(rec.Brand ?? rec.brand);
+      if (!spec1) spec1 = extractPlainValue(rec.Spec_1 ?? rec.spec1);
+      if (!spec2) spec2 = extractPlainValue(rec.Spec_2 ?? rec.spec2);
+      if (!spec3) spec3 = extractPlainValue(rec.Spec_3 ?? rec.spec3);
+      if (!spec4) spec4 = extractPlainValue(rec.Spec_4 ?? rec.spec4);
+      if (!itemCode) itemCode = readItemCodeFromRecord(rec);
+    }
+
+    items.push({
       itemId: itemMasterId || rowId,
+      itemCode: itemCode || "",
       rowId,
       product,
       quantity,
@@ -1284,57 +1405,11 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       mainCategory,
       productType,
       brand,
-      spec1: pickSpec(row.Spec_1, row.spec1, productObj?.Spec_1, productObj?.spec1),
-      spec2: pickSpec(row.Spec_2, row.spec2, productObj?.Spec_2, productObj?.spec2),
-      spec3: pickSpec(row.Spec_3, row.spec3, productObj?.Spec_3, productObj?.spec3),
-      spec4: pickSpec(row.Spec_4, row.spec4, productObj?.Spec_4, productObj?.spec4),
-    };
-  });
-
-  // If RFQ_Products lacks catalog fields, fall back to Item Master (Items report).
-  const needsItemCatalog = items.some(
-    (it) =>
-      it.itemId &&
-      ((!it.spec1 && !it.spec2 && !it.spec3 && !it.spec4) ||
-        !it.mainCategory ||
-        !it.productType ||
-        !it.brand)
-  );
-  if (needsItemCatalog) {
-    for (const it of items) {
-      if (!it.itemId || !isRecordId(it.itemId)) continue;
-      const needsSpecs = !it.spec1 && !it.spec2 && !it.spec3 && !it.spec4;
-      const needsCat = !it.mainCategory || !it.productType || !it.brand;
-      if (!needsSpecs && !needsCat) continue;
-      try {
-        const url =
-          `${API_HOST}/creator/v2.1/data/${owner()}/${app()}/report/${ITEM_MASTER_REPORT}` +
-          `/${it.itemId}?field_config=all`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Zoho-oauthtoken ${token}` },
-        });
-        const data = await res.json().catch(() => ({}));
-        const rec = Array.isArray(data.data) ? data.data[0] : data.data;
-        if (data.code !== 3000 || !rec) continue;
-        if (needsSpecs) {
-          it.spec1 = extractPlainValue(rec.Spec_1 ?? rec.spec1);
-          it.spec2 = extractPlainValue(rec.Spec_2 ?? rec.spec2);
-          it.spec3 = extractPlainValue(rec.Spec_3 ?? rec.spec3);
-          it.spec4 = extractPlainValue(rec.Spec_4 ?? rec.spec4);
-        }
-        if (!it.mainCategory) {
-          it.mainCategory = extractPlainValue(rec.Main_Category ?? rec.mainCategory);
-        }
-        if (!it.productType) {
-          it.productType = extractPlainValue(rec.Product_Type ?? rec.productType);
-        }
-        if (!it.brand) {
-          it.brand = extractPlainValue(rec.Brand ?? rec.brand);
-        }
-      } catch {
-        // ignore per-item lookup failures
-      }
-    }
+      spec1,
+      spec2,
+      spec3,
+      spec4,
+    });
   }
 
   return {

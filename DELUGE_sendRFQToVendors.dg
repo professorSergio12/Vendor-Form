@@ -1,26 +1,19 @@
 // AiraTrex — sendRFQToVendors
 // Paste into Zoho Creator → Functions → sendRFQToVendors (EDIT existing)
 //
-// Changes added (requested):
-// 1) Email + URL: Brand column after Spec 4, before Product Description
-// 2) Email header: "Description" → "Product Description"
-// 3) Brand parsed from widget payload / Items.Brand / RFQ_Products.Brand
-// 4) Form URL includes &brands= (pipe-separated)
-// 5) Spec URL keys use spec_1s..spec_4s (React form compatible)
-// Kept from live Creator: Vercel form URL, 960px email layout, reply-to,
-// Vendor_Response_Status skip, Items.Type_field for product type
+// Item ID on email/form = widget crmItemId (AT23-01), passed as &crm_item_ids=
+// item_ids stays Zoho Items record ID for matching
 
 string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, string rfqPayload)
 {
-	reactFormBaseUrl = "https://aire-trex.vercel.app";
-	// 	reactFormBaseUrl = "http://localhost:5173";
+	// 	reactFormBaseUrl = "https://aire-trex.vercel.app";
+	reactFormBaseUrl = "http://localhost:5173";
 	accountOwner = "airatrex959";
 	appLinkName = "airatrex";
 	rfqReportLinkName = "RFQ1";
 	normalizedItems = List();
 	emailsSent = 0;
 	rowsUpdated = 0;
-	// PATH 1: rfqPayload JSON string (widget always sends this)
 	if(rfqPayload != null && rfqPayload != "")
 	{
 		if(rfqNumber == null || rfqNumber == "")
@@ -52,6 +45,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				if(directId != null && directId != "")
 				{
 					itemMap.put("itemId",directId);
+					itemMap.put("crmItemId",ifnull(rawItem.get("crmItemId"),ifnull(rawItem.getJSON("crmItemId"),"")));
 					itemMap.put("productName",ifnull(rawItem.get("productName"),ifnull(rawItem.getJSON("productName"),"")));
 					itemMap.put("quantity",ifnull(rawItem.get("quantity"),ifnull(rawItem.getJSON("quantity"),"")));
 					itemMap.put("unit",ifnull(rawItem.get("unit"),ifnull(rawItem.getJSON("unit"),"")));
@@ -71,7 +65,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			}
 		}
 	}
-	// PATH 2: itemsList fallback
 	if(normalizedItems.isEmpty() && itemsList != null && !itemsList.isEmpty())
 	{
 		for each  rawItem in itemsList
@@ -81,6 +74,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			if(directId != null && directId != "")
 			{
 				itemMap.put("itemId",directId);
+				itemMap.put("crmItemId",ifnull(rawItem.get("crmItemId"),""));
 				itemMap.put("productName",ifnull(rawItem.get("productName"),""));
 				itemMap.put("quantity",ifnull(rawItem.get("quantity"),""));
 				itemMap.put("unit",ifnull(rawItem.get("unit"),""));
@@ -105,6 +99,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				{
 					parsedMap = rawText.toMap();
 					itemMap.put("itemId",ifnull(parsedMap.get("itemId"),""));
+					itemMap.put("crmItemId",ifnull(parsedMap.get("crmItemId"),""));
 					itemMap.put("productName",ifnull(parsedMap.get("productName"),""));
 					itemMap.put("quantity",ifnull(parsedMap.get("quantity"),""));
 					itemMap.put("unit",ifnull(parsedMap.get("unit"),""));
@@ -128,7 +123,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: no items parsed - add rfqPayload (string) param to Custom API";
 	}
-	// Due date for vendor email + React form URL (ISO yyyy-MM-dd from widget payload, else RFQ.Due_Date)
 	dueDateIso = "";
 	dueDateDisplay = "";
 	if(rfqPayload != null && rfqPayload != "")
@@ -154,11 +148,12 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		dueDateDisplay = dueDateIso;
 	}
-	// Quantity/unit fallback from RFQ_Products when widget payload is empty
 	qtyByProductId = Map();
 	unitByProductId = Map();
 	qtyByRowId = Map();
 	unitByRowId = Map();
+	itemCodeByProductId = Map();
+	itemCodeByRowId = Map();
 	if(rfqRecordId != null && rfqRecordId != "")
 	{
 		try
@@ -183,15 +178,24 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					}
 					qtyVal = (ifnull(prodRow.Quantity,"") + "").trim();
 					unitVal = (ifnull(prodRow.Unit,"") + "").trim();
+					itemCodeVal = (ifnull(prodRow.Item_Id,"") + "").trim();
 					if(rowId != null && rowId != "")
 					{
 						qtyByRowId.put(rowId,qtyVal);
 						unitByRowId.put(rowId,unitVal);
+						if(itemCodeVal != null && itemCodeVal != "")
+						{
+							itemCodeByRowId.put(rowId,itemCodeVal);
+						}
 					}
 					if(productId != null && productId != "")
 					{
 						qtyByProductId.put(productId,qtyVal);
 						unitByProductId.put(productId,unitVal);
+						if(itemCodeVal != null && itemCodeVal != "")
+						{
+							itemCodeByProductId.put(productId,itemCodeVal);
+						}
 					}
 				}
 			}
@@ -200,8 +204,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		{
 		}
 	}
-	// Description / Brand come from widget payload; Items used only as fallback
-	// Normalize vendorRecordId
 	resolvedItems = List();
 	for each  item in normalizedItems
 	{
@@ -266,10 +268,20 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		{
 			newItem = Map();
 			newItem.put("itemId",ifnull(item.get("itemId"),""));
+			crmItemIdVal = ifnull(item.get("crmItemId"),"").trim();
+			itemIdKey = ifnull(item.get("itemId"),"");
+			if(crmItemIdVal == null || crmItemIdVal == "" && itemIdKey != null && itemIdKey != "" && itemCodeByRowId.containKey(itemIdKey))
+			{
+				crmItemIdVal = itemCodeByRowId.get(itemIdKey);
+			}
+			if(crmItemIdVal == null || crmItemIdVal == "" && itemIdKey != null && itemIdKey != "" && itemCodeByProductId.containKey(itemIdKey))
+			{
+				crmItemIdVal = itemCodeByProductId.get(itemIdKey);
+			}
+			newItem.put("crmItemId",(crmItemIdVal + "").trim());
 			newItem.put("productName",ifnull(item.get("productName"),""));
 			itemQty = ifnull(item.get("quantity"),"");
 			itemUnit = ifnull(item.get("unit"),"");
-			itemIdKey = ifnull(item.get("itemId"),"");
 			if(itemQty == null || itemQty == "" && itemIdKey != null && itemIdKey != "" && qtyByRowId.containKey(itemIdKey))
 			{
 				itemQty = qtyByRowId.get(itemIdKey);
@@ -306,7 +318,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: no items with valid vendorRecordId after normalize";
 	}
-	// Group by vendorRecordId — one vendor = one email
 	vendorDataMap = Map();
 	for each  item in resolvedItems
 	{
@@ -327,7 +338,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	{
 		return "error: grouping failed - vendor keys missing after normalize";
 	}
-	// One email per vendor with all items in single link
 	emailedItemsByVendor = Map();
 	for each  vendorKey in vendorDataMap.keys()
 	{
@@ -385,6 +395,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		}
 		displayVendorName = displayVendorName.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 		itemIdsStr = "";
+		crmItemIdsStr = "";
 		productNamesStr = "";
 		quantitiesStr = "";
 		unitsStr = "";
@@ -401,6 +412,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		for each  item in vendorItems
 		{
 			itemId = ifnull(item.get("itemId"),"");
+			crmItemId = ifnull(item.get("crmItemId"),"").trim();
 			productName = ifnull(item.get("productName"),"");
 			quantity = (ifnull(item.get("quantity"),"") + "").trim();
 			unit = (ifnull(item.get("unit"),"") + "").trim();
@@ -441,6 +453,20 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			spec2 = ifnull(item.get("spec2"),"").trim();
 			spec3 = ifnull(item.get("spec3"),"").trim();
 			spec4 = ifnull(item.get("spec4"),"").trim();
+			if(crmItemId == null || crmItemId == "")
+			{
+				if(itemId != null && itemId != "" && itemCodeByRowId.containKey(itemId))
+				{
+					crmItemId = (itemCodeByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(crmItemId == null || crmItemId == "")
+			{
+				if(itemId != null && itemId != "" && itemCodeByProductId.containKey(itemId))
+				{
+					crmItemId = (itemCodeByProductId.get(itemId) + "").trim();
+				}
+			}
 			if(itemId != null && itemId != "")
 			{
 				try
@@ -486,6 +512,11 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				{
 				}
 			}
+			displayItemId = crmItemId;
+			if(displayItemId == null || displayItemId == "")
+			{
+				displayItemId = itemId;
+			}
 			displayProductName = productName;
 			displayDescription = description;
 			displayMainCategory = mainCategory;
@@ -495,6 +526,10 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			displaySpec2 = spec2;
 			displaySpec3 = spec3;
 			displaySpec4 = spec4;
+			if(displayItemId == null || displayItemId == "")
+			{
+				displayItemId = "-";
+			}
 			if(displayProductName == null || displayProductName == "")
 			{
 				displayProductName = "-";
@@ -531,6 +566,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			{
 				displaySpec4 = "-";
 			}
+			displayItemId = displayItemId.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displayProductName = displayProductName.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displayDescription = displayDescription.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displayMainCategory = displayMainCategory.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
@@ -547,6 +583,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			if(itemIdsStr != "")
 			{
 				itemIdsStr = itemIdsStr + "|";
+				crmItemIdsStr = crmItemIdsStr + "|";
 				productNamesStr = productNamesStr + "|";
 				quantitiesStr = quantitiesStr + "|";
 				unitsStr = unitsStr + "|";
@@ -560,6 +597,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				spec4sStr = spec4sStr + "|";
 			}
 			itemIdsStr = itemIdsStr + itemId;
+			crmItemIdsStr = crmItemIdsStr + crmItemId;
 			productNamesStr = productNamesStr + productName;
 			quantitiesStr = quantitiesStr + quantity;
 			unitsStr = unitsStr + unit;
@@ -574,6 +612,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			qtyDisplay = quantity;
 			tdStyle = "padding:10px 12px;border-bottom:1px solid #eef1f5;font-size:13px;color:#1f2733;font-weight:400;vertical-align:top;";
 			tableRows = tableRows + "<tr>";
+			tableRows = tableRows + "<td style='" + tdStyle + "white-space:nowrap;font-weight:600;'>" + displayItemId + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "white-space:nowrap;'>" + displayMainCategory + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "white-space:nowrap;'>" + displayProductType + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "text-align:center;white-space:nowrap;'>" + qtyDisplay + "</td>";
@@ -598,6 +637,8 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		urlParams = urlParams + "&vendor_name=" + vendorName;
 		urlParams = urlParams + "&email=" + vendorEmail;
 		urlParams = urlParams + "&item_ids=" + itemIdsStr;
+		urlParams = urlParams + "&crm_item_ids=" + crmItemIdsStr;
+		urlParams = urlParams + "&item_codes=" + crmItemIdsStr;
 		urlParams = urlParams + "&products=" + productNamesStr;
 		urlParams = urlParams + "&quantities=" + quantitiesStr;
 		urlParams = urlParams + "&units=" + unitsStr;
@@ -646,6 +687,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		emailBody = emailBody + "<div style='width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;'>";
 		emailBody = emailBody + "<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;border:1px solid #e9ecf1;border-radius:10px;overflow:hidden;min-width:920px;'>";
 		emailBody = emailBody + "<tr style='background-color:#fafbfc;'>";
+		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Item ID</th>";
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Main Category</th>";
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Product Type</th>";
 		emailBody = emailBody + "<th align='center' style='" + thStyle + "'>Qty</th>";
@@ -675,7 +717,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		emailsSent = emailsSent + 1;
 		emailedItemsByVendor.put(vendorRecordId,emailedIds);
 	}
-	// Single Vendor_Selection update after all emails (faster than per-vendor updateRecord)
 	if(rfqRecordId != null && rfqRecordId != "" && emailsSent > 0)
 	{
 		try
@@ -771,7 +812,6 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					}
 					rowMap.put("RFQ_Email_Sent",ifnull(vsRow.RFQ_Email_Sent,"Not Sent"));
 					rowMap.put("Email_Sent_Date",ifnull(vsRow.Email_Sent_Date,""));
-					// Vendor_Response_Status intentionally not updated (requested)
 					if(vendorInAnyEmail && itemEmailed)
 					{
 						rowMap.put("RFQ_Email_Sent","Sent");
