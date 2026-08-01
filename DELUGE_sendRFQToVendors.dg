@@ -1,13 +1,11 @@
 // AiraTrex — sendRFQToVendors
-// Paste into Zoho Creator → Functions → sendRFQToVendors (EDIT existing)
-//
-// Item ID on email/form = widget crmItemId (AT23-01), passed as &crm_item_ids=
-// item_ids stays Zoho Items record ID for matching
+// Synced from Creator (live). Do not strip partNumber / part_numbers.
+// Toggle reactFormBaseUrl for local vs Vercel before save.
 
 string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, string rfqPayload)
 {
-	// 	reactFormBaseUrl = "https://aire-trex.vercel.app";
-	reactFormBaseUrl = "http://localhost:5173";
+// 	reactFormBaseUrl = "https://aire-trex.vercel.app";
+			reactFormBaseUrl = "http://localhost:5173";
 	accountOwner = "airatrex959";
 	appLinkName = "airatrex";
 	rfqReportLinkName = "RFQ1";
@@ -56,6 +54,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					itemMap.put("mainCategory",ifnull(rawItem.get("mainCategory"),ifnull(rawItem.getJSON("mainCategory"),"")));
 					itemMap.put("productType",ifnull(rawItem.get("productType"),ifnull(rawItem.getJSON("productType"),"")));
 					itemMap.put("brand",ifnull(rawItem.get("brand"),ifnull(rawItem.getJSON("brand"),ifnull(rawItem.get("Brand"),ifnull(rawItem.getJSON("Brand"),"")))));
+					itemMap.put("partNumber",ifnull(rawItem.get("partNumber"),ifnull(rawItem.getJSON("partNumber"),ifnull(rawItem.get("Part_Number"),ifnull(rawItem.getJSON("Part_Number"),"")))));
 					itemMap.put("spec1",ifnull(rawItem.get("spec1"),ifnull(rawItem.getJSON("spec1"),"")));
 					itemMap.put("spec2",ifnull(rawItem.get("spec2"),ifnull(rawItem.getJSON("spec2"),"")));
 					itemMap.put("spec3",ifnull(rawItem.get("spec3"),ifnull(rawItem.getJSON("spec3"),"")));
@@ -85,6 +84,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				itemMap.put("mainCategory",ifnull(rawItem.get("mainCategory"),""));
 				itemMap.put("productType",ifnull(rawItem.get("productType"),""));
 				itemMap.put("brand",ifnull(rawItem.get("brand"),ifnull(rawItem.get("Brand"),"")));
+				itemMap.put("partNumber",ifnull(rawItem.get("partNumber"),ifnull(rawItem.get("Part_Number"),"")));
 				itemMap.put("spec1",ifnull(rawItem.get("spec1"),""));
 				itemMap.put("spec2",ifnull(rawItem.get("spec2"),""));
 				itemMap.put("spec3",ifnull(rawItem.get("spec3"),""));
@@ -110,6 +110,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					itemMap.put("mainCategory",ifnull(parsedMap.get("mainCategory"),""));
 					itemMap.put("productType",ifnull(parsedMap.get("productType"),""));
 					itemMap.put("brand",ifnull(parsedMap.get("brand"),ifnull(parsedMap.get("Brand"),"")));
+					itemMap.put("partNumber",ifnull(parsedMap.get("partNumber"),ifnull(parsedMap.get("Part_Number"),"")));
 					itemMap.put("spec1",ifnull(parsedMap.get("spec1"),""));
 					itemMap.put("spec2",ifnull(parsedMap.get("spec2"),""));
 					itemMap.put("spec3",ifnull(parsedMap.get("spec3"),""));
@@ -154,6 +155,8 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 	unitByRowId = Map();
 	itemCodeByProductId = Map();
 	itemCodeByRowId = Map();
+	partNumberByProductId = Map();
+	partNumberByRowId = Map();
 	if(rfqRecordId != null && rfqRecordId != "")
 	{
 		try
@@ -179,6 +182,11 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 					qtyVal = (ifnull(prodRow.Quantity,"") + "").trim();
 					unitVal = (ifnull(prodRow.Unit,"") + "").trim();
 					itemCodeVal = (ifnull(prodRow.Item_Id,"") + "").trim();
+					partNumberVal = (ifnull(prodRow.Part_Number,"") + "").trim();
+					if(itemCodeVal == null || itemCodeVal == "")
+					{
+						itemCodeVal = (ifnull(prodRow.Item_Id,"") + "").trim();
+					}
 					if(rowId != null && rowId != "")
 					{
 						qtyByRowId.put(rowId,qtyVal);
@@ -187,6 +195,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 						{
 							itemCodeByRowId.put(rowId,itemCodeVal);
 						}
+						partNumberByRowId.put(rowId,partNumberVal);
 					}
 					if(productId != null && productId != "")
 					{
@@ -196,6 +205,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 						{
 							itemCodeByProductId.put(productId,itemCodeVal);
 						}
+						partNumberByProductId.put(productId,partNumberVal);
 					}
 				}
 			}
@@ -307,6 +317,16 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			newItem.put("mainCategory",ifnull(item.get("mainCategory"),"").trim());
 			newItem.put("productType",ifnull(item.get("productType"),"").trim());
 			newItem.put("brand",ifnull(item.get("brand"),"").trim());
+			itemPartNumber = ifnull(item.get("partNumber"),"").trim();
+			if(itemPartNumber == null || itemPartNumber == "" && itemIdKey != null && itemIdKey != "" && partNumberByRowId.containKey(itemIdKey))
+			{
+				itemPartNumber = (partNumberByRowId.get(itemIdKey) + "").trim();
+			}
+			if(itemPartNumber == null || itemPartNumber == "" && itemIdKey != null && itemIdKey != "" && partNumberByProductId.containKey(itemIdKey))
+			{
+				itemPartNumber = (partNumberByProductId.get(itemIdKey) + "").trim();
+			}
+			newItem.put("partNumber",itemPartNumber);
 			newItem.put("spec1",ifnull(item.get("spec1"),"").trim());
 			newItem.put("spec2",ifnull(item.get("spec2"),"").trim());
 			newItem.put("spec3",ifnull(item.get("spec3"),"").trim());
@@ -403,6 +423,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		mainCategoriesStr = "";
 		productTypesStr = "";
 		brandsStr = "";
+		partNumbersStr = "";
 		spec1sStr = "";
 		spec2sStr = "";
 		spec3sStr = "";
@@ -449,6 +470,21 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			mainCategory = ifnull(item.get("mainCategory"),"").trim();
 			productType = ifnull(item.get("productType"),"").trim();
 			brand = ifnull(item.get("brand"),"").trim();
+			partNumber = ifnull(item.get("partNumber"),"").trim();
+			if(partNumber == null || partNumber == "")
+			{
+				if(itemId != null && itemId != "" && partNumberByRowId.containKey(itemId))
+				{
+					partNumber = (partNumberByRowId.get(itemId) + "").trim();
+				}
+			}
+			if(partNumber == null || partNumber == "")
+			{
+				if(itemId != null && itemId != "" && partNumberByProductId.containKey(itemId))
+				{
+					partNumber = (partNumberByProductId.get(itemId) + "").trim();
+				}
+			}
 			spec1 = ifnull(item.get("spec1"),"").trim();
 			spec2 = ifnull(item.get("spec2"),"").trim();
 			spec3 = ifnull(item.get("spec3"),"").trim();
@@ -522,6 +558,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			displayMainCategory = mainCategory;
 			displayProductType = productType;
 			displayBrand = brand;
+			displayPartNumber = partNumber;
 			displaySpec1 = spec1;
 			displaySpec2 = spec2;
 			displaySpec3 = spec3;
@@ -550,6 +587,10 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			{
 				displayBrand = "-";
 			}
+			if(displayPartNumber == null || displayPartNumber == "")
+			{
+				displayPartNumber = "-";
+			}
 			if(displaySpec1 == null || displaySpec1 == "")
 			{
 				displaySpec1 = "-";
@@ -572,6 +613,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			displayMainCategory = displayMainCategory.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displayProductType = displayProductType.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displayBrand = displayBrand.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+			displayPartNumber = displayPartNumber.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displaySpec1 = displaySpec1.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displaySpec2 = displaySpec2.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 			displaySpec3 = displaySpec3.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
@@ -591,6 +633,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 				mainCategoriesStr = mainCategoriesStr + "|";
 				productTypesStr = productTypesStr + "|";
 				brandsStr = brandsStr + "|";
+				partNumbersStr = partNumbersStr + "|";
 				spec1sStr = spec1sStr + "|";
 				spec2sStr = spec2sStr + "|";
 				spec3sStr = spec3sStr + "|";
@@ -605,6 +648,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			mainCategoriesStr = mainCategoriesStr + encodeUrl(mainCategory);
 			productTypesStr = productTypesStr + encodeUrl(productType);
 			brandsStr = brandsStr + encodeUrl(brand);
+			partNumbersStr = partNumbersStr + encodeUrl(partNumber);
 			spec1sStr = spec1sStr + encodeUrl(spec1);
 			spec2sStr = spec2sStr + encodeUrl(spec2);
 			spec3sStr = spec3sStr + encodeUrl(spec3);
@@ -621,6 +665,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 			tableRows = tableRows + "<td style='" + tdStyle + "'>" + displaySpec3 + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "'>" + displaySpec4 + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "white-space:nowrap;'>" + displayBrand + "</td>";
+			tableRows = tableRows + "<td style='" + tdStyle + "white-space:nowrap;'>" + displayPartNumber + "</td>";
 			tableRows = tableRows + "<td style='" + tdStyle + "min-width:120px;word-wrap:break-word;'>" + displayDescription + "</td>";
 			tableRows = tableRows + "</tr>";
 		}
@@ -646,6 +691,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		urlParams = urlParams + "&main_categories=" + mainCategoriesStr;
 		urlParams = urlParams + "&product_types=" + productTypesStr;
 		urlParams = urlParams + "&brands=" + brandsStr;
+		urlParams = urlParams + "&part_numbers=" + partNumbersStr;
 		urlParams = urlParams + "&spec_1s=" + spec1sStr;
 		urlParams = urlParams + "&spec_2s=" + spec2sStr;
 		urlParams = urlParams + "&spec_3s=" + spec3sStr;
@@ -696,6 +742,7 @@ string sendRFQToVendors(string rfqNumber, string rfqRecordId, list itemsList, st
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Spec 3</th>";
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Spec 4</th>";
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Brand</th>";
+		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Part Number</th>";
 		emailBody = emailBody + "<th align='left' style='" + thStyle + "'>Product Description</th>";
 		emailBody = emailBody + "</tr>";
 		emailBody = emailBody + tableRows;

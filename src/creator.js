@@ -37,6 +37,8 @@ const availableQuantityField = () =>
   process.env.CREATOR_AVAILABLE_QUANTITY_FIELD || "Available_Quantity";
 const actualProductNameField = () =>
   process.env.CREATOR_ACTUAL_PRODUCT_NAME_FIELD || "Actual_Product_Name";
+const partNumberField = () =>
+  process.env.CREATOR_PART_NUMBER_FIELD || "Part_Number";
 
 const QUOTATIONS_REPORT =
   process.env.CREATOR_QUOTATIONS_REPORT || "Vendor_Quotations_Report";
@@ -344,6 +346,7 @@ export function buildSubformRow(p) {
     ["mainCategory", "Main_Category"],
     ["productType", "Product_Type"],
     ["brand", "Brand"],
+    ["partNumber", partNumberField()],
     ["spec1", "Spec_1"],
     ["spec2", "Spec_2"],
     ["spec3", "Spec_3"],
@@ -1339,6 +1342,15 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       productObj?.Brand,
       productObj?.brand
     );
+    let partNumber = pickSpec(
+      row.Part_Number,
+      row.part_number,
+      row.partNumber,
+      row.PartNumber,
+      productObj?.Part_Number,
+      productObj?.part_number,
+      productObj?.partNumber
+    );
     let itemCode = pickSpec(
       row.Item_Id,
       row.Item_ID,
@@ -1387,6 +1399,11 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
         );
       }
       if (!brand) brand = extractPlainValue(rec.Brand ?? rec.brand);
+      if (!partNumber) {
+        partNumber = extractPlainValue(
+          rec.Part_Number ?? rec.part_number ?? rec.partNumber
+        );
+      }
       if (!spec1) spec1 = extractPlainValue(rec.Spec_1 ?? rec.spec1);
       if (!spec2) spec2 = extractPlainValue(rec.Spec_2 ?? rec.spec2);
       if (!spec3) spec3 = extractPlainValue(rec.Spec_3 ?? rec.spec3);
@@ -1405,6 +1422,7 @@ export async function fetchRfqLineItemsForForm({ rfqRecordId, rfqNumber }) {
       mainCategory,
       productType,
       brand,
+      partNumber,
       spec1,
       spec2,
       spec3,
@@ -1593,6 +1611,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           mainCategory: line.mainCategory,
           productType: line.productType,
           brand: line.brand,
+          partNumber: line.partNumber,
           spec1: line.spec1,
           spec2: line.spec2,
           spec3: line.spec3,
