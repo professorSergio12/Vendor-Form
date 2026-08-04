@@ -39,6 +39,11 @@ const actualProductNameField = () =>
   process.env.CREATOR_ACTUAL_PRODUCT_NAME_FIELD || "Actual_Product_Name";
 const partNumberField = () =>
   process.env.CREATOR_PART_NUMBER_FIELD || "Part_Number";
+const itemIdField = () => process.env.CREATOR_ITEM_ID_FIELD || "Item_Id1";
+const itemPartNumberField = () =>
+  process.env.CREATOR_ITEM_PART_NUMBER_FIELD || "Item_Part_Number";
+const vendorProductDescriptionField = () =>
+  process.env.CREATOR_VENDOR_PRODUCT_DESCRIPTION_FIELD || "Vendor_Product_Description";
 
 const QUOTATIONS_REPORT =
   process.env.CREATOR_QUOTATIONS_REPORT || "Vendor_Quotations_Report";
@@ -329,6 +334,10 @@ export function buildSubformRow(p) {
   if (p.remarks) {
     row.Remarks = p.remarks;
   }
+  const vendorDesc = String(p.vendorProductDescription ?? "").trim();
+  if (vendorDesc) {
+    row[vendorProductDescriptionField()] = vendorDesc;
+  }
 
   const deliveryFormatted = formatCreatorDate(p.deliveryDate);
   if (deliveryFormatted) {
@@ -342,11 +351,18 @@ export function buildSubformRow(p) {
     row[actualProductNameField()] = actualName;
   }
 
+  // Human Item ID (AT123-01) — not the Zoho record id.
+  const itemCode = String(p.itemCode ?? "").trim();
+  if (itemCode && !/^\d{10,}$/.test(itemCode)) {
+    row[itemIdField()] = itemCode;
+  }
+
   for (const [key, field] of [
     ["mainCategory", "Main_Category"],
     ["productType", "Product_Type"],
     ["brand", "Brand"],
     ["partNumber", partNumberField()],
+    ["itemPartNumber", itemPartNumberField()],
     ["spec1", "Spec_1"],
     ["spec2", "Spec_2"],
     ["spec3", "Spec_3"],
@@ -1579,6 +1595,51 @@ export async function sendQuotationConfirmationEmail(payload) {
   });
 }
 
+/** Fill line.itemCode from RFQ_Products.Item_Id when the form omitted it. */
+async function enrichLinePayloadsWithItemCodes(linePayloads, rfqId, token) {
+  if (!rfqId || !Array.isArray(linePayloads) || !linePayloads.length) {
+    return linePayloads;
+  }
+
+  const needsLookup = linePayloads.some((line) => {
+    const code = String(line?.itemCode ?? "").trim();
+    return !code || /^\d{10,}$/.test(code);
+  });
+  if (!needsLookup) return linePayloads;
+
+  const rfqRec = await fetchRfqRecord(rfqId, token);
+  const rows = rfqRec?.[RFQ_PRODUCTS_SUBFORM];
+  if (!Array.isArray(rows) || !rows.length) return linePayloads;
+
+  const byId = new Map();
+  const byIndex = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const code = extractPlainValue(
+      row.Item_Id ?? row.Item_ID ?? row.item_id ?? row.itemId
+    );
+    const rowId = lookupId(row.ID ?? row.id);
+    const productId = lookupId(row.Product ?? row.Item_Master);
+    if (code) {
+      if (rowId) byId.set(String(rowId), code);
+      if (productId) byId.set(String(productId), code);
+    }
+    byIndex.push(code || "");
+  }
+
+  return linePayloads.map((line, index) => {
+    const existing = String(line.itemCode ?? "").trim();
+    if (existing && !/^\d{10,}$/.test(existing)) return line;
+
+    const key = String(line.itemId || line.itemMasterId || "").trim();
+    const fromMap = key ? byId.get(key) : "";
+    const fromIndex = byIndex[index] || "";
+    const itemCode = fromMap || fromIndex || existing;
+    if (!itemCode || /^\d{10,}$/.test(itemCode)) return line;
+    return { ...line, itemCode };
+  });
+}
+
 export async function createQuotationRecord(flatPayload, files = {}) {
   const token = await getAccessToken();
 
@@ -1599,6 +1660,7 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           ...flatPayload,
           itemId: line.itemId,
           itemMasterId: line.itemMasterId || line.itemId,
+          itemCode: line.itemCode,
           product: line.product,
           originalProduct: line.originalProduct,
           productEdited: line.productEdited,
@@ -1612,6 +1674,8 @@ export async function createQuotationRecord(flatPayload, files = {}) {
           productType: line.productType,
           brand: line.brand,
           partNumber: line.partNumber,
+          itemPartNumber: line.itemPartNumber,
+          vendorProductDescription: line.vendorProductDescription,
           spec1: line.spec1,
           spec2: line.spec2,
           spec3: line.spec3,
@@ -1633,6 +1697,9 @@ export async function createQuotationRecord(flatPayload, files = {}) {
   if (!linePayloads.length) {
     linePayloads = [{ ...flatPayload, itemMasterId: flatPayload.itemMasterId || flatPayload.itemId }];
   }
+
+  // Fill missing itemCode (AT123-01) from RFQ_Products when form/URL omitted it.
+  linePayloads = await enrichLinePayloadsWithItemCodes(linePayloads, rfqId, token);
 
   const subformRows = [];
   const resolvedItemMasters = [];
