@@ -361,8 +361,6 @@ export function buildSubformRow(p) {
     ["mainCategory", "Main_Category"],
     ["productType", "Product_Type"],
     ["brand", "Brand"],
-    ["partNumber", partNumberField()],
-    ["itemPartNumber", itemPartNumberField()],
     ["spec1", "Spec_1"],
     ["spec2", "Spec_2"],
     ["spec3", "Spec_3"],
@@ -370,6 +368,16 @@ export function buildSubformRow(p) {
   ]) {
     const value = String(p[key] ?? "").trim();
     if (value) row[field] = value;
+  }
+
+  // Part_Number = RFQ read-only value only. Never write vendor Item Part Number into it.
+  const rfqPartNumber = String(p.partNumber ?? "").trim();
+  const vendorItemPartNumber = String(p.itemPartNumber ?? "").trim();
+  if (rfqPartNumber) {
+    row[partNumberField()] = rfqPartNumber;
+  }
+  if (vendorItemPartNumber) {
+    row[itemPartNumberField()] = vendorItemPartNumber;
   }
 
   const availQty = num(p.availableQuantity, NaN);
